@@ -53,3 +53,6 @@ server.log
 .env
 .env.local
 .env.*.local
+
+# Uploads
+/upload/
