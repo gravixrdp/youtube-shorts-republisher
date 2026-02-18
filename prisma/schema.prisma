@@ -1,32 +1,80 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-model User {
+// Configuration storage - key-value pairs for app settings
+model Config {
   id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+  key       String   @unique
+  value     String   @db.Text
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@map("config")
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// YouTube Shorts data storage
+model ShortsData {
+  id              String    @id @default(cuid())
+  videoId         String    @unique // YouTube Video ID (prevents duplicates)
+  videoUrl        String
+  title           String
+  description     String?   @db.Text
+  tags            String?   @db.Text // JSON array of tags
+  thumbnailUrl    String?
+  duration        Int       // Duration in seconds
+  publishedDate   DateTime? // Original publish date
+  status          String    @default("Pending") // Pending, Downloaded, Uploading, Uploaded, Failed
+  scheduledDate   DateTime? // Planned upload date
+  uploadedDate    DateTime? // Actual upload timestamp
+  targetVideoId   String?   // YouTube ID after upload
+  retryCount      Int       @default(0)
+  errorLog        String?   @db.Text
+  aiTitle         String?   // AI-enhanced title
+  aiDescription   String?   @db.Text // AI-enhanced description
+  aiHashtags      String?   // AI-generated hashtags
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([status])
+  @@index([scheduledDate])
+  @@map("shorts_data")
+}
+
+// Upload logs for tracking
+model UploadLog {
+  id          String   @id @default(cuid())
+  shortId     String
+  action      String   // fetch, download, upload, etc.
+  status      String   // success, error
+  message     String?  @db.Text
+  details     String?  @db.Text // JSON details
+  createdAt   DateTime @default(now())
+
+  @@index([shortId])
+  @@index([createdAt])
+  @@map("upload_logs")
+}
+
+// Scheduler state for tracking runs
+model SchedulerState {
+  id              String   @id @default(cuid())
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  isRunning       Boolean  @default(false)
+  uploadsToday    Int      @default(0)
+  currentStatus   String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("scheduler_state")
 }
