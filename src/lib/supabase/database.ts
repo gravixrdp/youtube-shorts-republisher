@@ -45,6 +45,87 @@ export async function setMultipleConfig(configs: Record<string, string>): Promis
   return !error;
 }
 
+// ==================== CHANNEL MAPPINGS ====================
+
+export interface ChannelMapping {
+  id: string;
+  name: string;
+  source_channel_id: string;
+  source_channel_url: string;
+  target_channel_id: string;
+  target_channel_name: string;
+  is_active: boolean;
+  uploads_per_day: number;
+  last_fetched_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getChannelMappings(): Promise<ChannelMapping[]> {
+  const { data, error } = await supabaseAdmin
+    .from('channel_mappings')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error fetching channel mappings:', error);
+    return [];
+  }
+  return data || [];
+}
+
+export async function getActiveChannelMappings(): Promise<ChannelMapping[]> {
+  const { data, error } = await supabaseAdmin
+    .from('channel_mappings')
+    .select('*')
+    .eq('is_active', true)
+    .order('created_at', { ascending: false });
+
+  if (error) return [];
+  return data || [];
+}
+
+export async function createChannelMapping(mapping: Partial<ChannelMapping>): Promise<ChannelMapping | null> {
+  const { data, error } = await supabaseAdmin
+    .from('channel_mappings')
+    .insert(mapping)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Error creating channel mapping:', error);
+    return null;
+  }
+  return data;
+}
+
+export async function updateChannelMapping(id: string, data: Partial<ChannelMapping>): Promise<boolean> {
+  const { error } = await supabaseAdmin
+    .from('channel_mappings')
+    .update({ ...data, updated_at: new Date().toISOString() })
+    .eq('id', id);
+
+  return !error;
+}
+
+export async function deleteChannelMapping(id: string): Promise<boolean> {
+  const { error } = await supabaseAdmin
+    .from('channel_mappings')
+    .delete()
+    .eq('id', id);
+
+  return !error;
+}
+
+export async function updateLastFetched(id: string): Promise<boolean> {
+  const { error } = await supabaseAdmin
+    .from('channel_mappings')
+    .update({ last_fetched_at: new Date().toISOString() })
+    .eq('id', id);
+
+  return !error;
+}
+
 // ==================== SHORTS DATA OPERATIONS ====================
 
 export async function createShort(data: Partial<ShortsData>): Promise<ShortsData | null> {
@@ -83,13 +164,19 @@ export async function getShortByVideoId(videoId: string): Promise<ShortsData | n
   return data;
 }
 
-export async function getPendingShorts(limit: number = 10): Promise<ShortsData[]> {
-  const { data, error } = await supabaseAdmin
+export async function getPendingShorts(limit: number = 10, mappingId?: string): Promise<ShortsData[]> {
+  let query = supabaseAdmin
     .from('shorts_data')
     .select('*')
     .eq('status', 'Pending')
     .order('created_at', { ascending: true })
     .limit(limit);
+
+  if (mappingId) {
+    query = query.eq('mapping_id', mappingId);
+  }
+
+  const { data, error } = await query;
 
   if (error) return [];
   return data || [];
@@ -143,24 +230,14 @@ export async function deleteShort(id: string): Promise<boolean> {
 }
 
 export async function incrementRetryCount(id: string, errorLog: string): Promise<boolean> {
-  const { error } = await supabaseAdmin.rpc('increment_retry_count', {
-    short_id: id,
-    error_message: errorLog
-  });
-
-  // Fallback if RPC doesn't exist
-  if (error) {
-    const short = await getShortById(id);
-    if (!short) return false;
-    
-    return updateShort(id, {
-      retry_count: short.retry_count + 1,
-      error_log: errorLog,
-      status: short.retry_count >= 2 ? 'Failed' : 'Pending'
-    });
-  }
+  const short = await getShortById(id);
+  if (!short) return false;
   
-  return true;
+  return updateShort(id, {
+    retry_count: short.retry_count + 1,
+    error_log: errorLog,
+    status: short.retry_count >= 2 ? 'Failed' : 'Pending'
+  });
 }
 
 // ==================== UPLOAD LOGS ====================
@@ -219,7 +296,6 @@ export async function getSchedulerState(): Promise<SchedulerState | null> {
 }
 
 export async function updateSchedulerState(data: Partial<SchedulerState>): Promise<boolean> {
-  // Get existing state or create new one
   const existing = await getSchedulerState();
   
   if (existing) {
@@ -248,14 +324,16 @@ export async function getStats() {
     pendingResult,
     uploadedResult,
     failedResult,
-    todayResult
+    todayResult,
+    mappingsResult
   ] = await Promise.all([
     supabaseAdmin.from('shorts_data').select('*', { count: 'exact', head: true }),
     supabaseAdmin.from('shorts_data').select('*', { count: 'exact', head: true }).eq('status', 'Pending'),
     supabaseAdmin.from('shorts_data').select('*', { count: 'exact', head: true }).eq('status', 'Uploaded'),
     supabaseAdmin.from('shorts_data').select('*', { count: 'exact', head: true }).eq('status', 'Failed'),
     supabaseAdmin.from('shorts_data').select('*', { count: 'exact', head: true })
-      .gte('uploaded_date', new Date().toISOString().split('T')[0])
+      .gte('uploaded_date', new Date().toISOString().split('T')[0]),
+    supabaseAdmin.from('channel_mappings').select('*', { count: 'exact', head: true }).eq('is_active', true)
   ]);
 
   return {
@@ -263,6 +341,7 @@ export async function getStats() {
     pending: pendingResult.count || 0,
     uploaded: uploadedResult.count || 0,
     failed: failedResult.count || 0,
-    uploadedToday: todayResult.count || 0
+    uploadedToday: todayResult.count || 0,
+    activeMappings: mappingsResult.count || 0
   };
 }

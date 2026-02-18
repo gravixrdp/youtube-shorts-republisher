@@ -2,13 +2,12 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { 
@@ -34,12 +33,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { 
   Play, 
-  Pause, 
   RefreshCw, 
   Download, 
   Upload, 
@@ -59,18 +56,17 @@ import {
   ExternalLink,
   Save,
   Search,
-  Filter,
   Sparkles,
-  BarChart3,
-  Users,
   Video,
   Timer,
   Moon,
   Sun,
-  ChevronRight,
-  Star,
-  Shield,
-  Rocket
+  Plus,
+  Link2,
+  ArrowRight,
+  Edit,
+  Power,
+  Globe
 } from 'lucide-react';
 
 // Types
@@ -84,13 +80,13 @@ interface Short {
   thumbnail_url: string | null;
   duration: number;
   status: string;
-  scheduled_date: string | null;
+  mapping_id: string | null;
+  source_channel: string | null;
+  target_channel: string | null;
   uploaded_date: string | null;
   target_video_id: string | null;
   retry_count: number;
   error_log: string | null;
-  ai_title: string | null;
-  ai_description: string | null;
   created_at: string;
 }
 
@@ -100,6 +96,7 @@ interface Stats {
   uploaded: number;
   failed: number;
   uploadedToday: number;
+  activeMappings: number;
 }
 
 interface Log {
@@ -118,30 +115,62 @@ interface SchedulerState {
   current_status: string | null;
 }
 
+interface ChannelMapping {
+  id: string;
+  name: string;
+  source_channel_id: string;
+  source_channel_url: string;
+  source_channel_name: string | null;
+  target_channel_id: string;
+  target_channel_name: string | null;
+  is_active: boolean;
+  uploads_per_day: number;
+  upload_time_morning: string;
+  upload_time_evening: string;
+  default_visibility: string;
+  ai_enhancement_enabled: boolean;
+  last_fetched_at: string | null;
+  total_fetched: number;
+  total_uploaded: number;
+  created_at: string;
+}
+
 interface Config {
   [key: string]: string;
 }
 
-export default function YouTubeShortsRepublisher() {
+export default function GRAVIX() {
   const { toast } = useToast();
   
   // State
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(false);
-  const [stats, setStats] = useState<Stats>({ total: 0, pending: 0, uploaded: 0, failed: 0, uploadedToday: 0 });
+  const [stats, setStats] = useState<Stats>({ total: 0, pending: 0, uploaded: 0, failed: 0, uploadedToday: 0, activeMappings: 0 });
   const [shorts, setShorts] = useState<Short[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
   const [config, setConfig] = useState<Config>({});
   const [schedulerState, setSchedulerState] = useState<SchedulerState | null>(null);
+  const [channelMappings, setChannelMappings] = useState<ChannelMapping[]>([]);
   
   // Form state
-  const [channelUrl, setChannelUrl] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   
   // Dialog state
   const [selectedShort, setSelectedShort] = useState<Short | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [showMappingDialog, setShowMappingDialog] = useState(false);
+  const [editingMapping, setEditingMapping] = useState<ChannelMapping | null>(null);
+  
+  // New mapping form
+  const [newMapping, setNewMapping] = useState({
+    name: '',
+    source_channel_url: '',
+    target_channel_id: '',
+    uploads_per_day: 2,
+    default_visibility: 'public',
+    ai_enhancement_enabled: false
+  });
   
   // Fetch data
   const fetchStats = useCallback(async () => {
@@ -182,6 +211,18 @@ export default function YouTubeShortsRepublisher() {
     }
   }, []);
   
+  const fetchMappings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/mappings');
+      const data = await res.json();
+      if (data.success) {
+        setChannelMappings(data.mappings || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch mappings:', error);
+    }
+  }, []);
+  
   useEffect(() => {
     let mounted = true;
     
@@ -190,7 +231,8 @@ export default function YouTubeShortsRepublisher() {
       await Promise.all([
         fetchStats(),
         fetchShorts(),
-        fetchConfig()
+        fetchConfig(),
+        fetchMappings()
       ]);
     };
     
@@ -204,21 +246,16 @@ export default function YouTubeShortsRepublisher() {
       mounted = false;
       clearInterval(interval);
     };
-  }, [fetchStats, fetchShorts, fetchConfig]);
+  }, [fetchStats, fetchShorts, fetchConfig, fetchMappings]);
   
   // Actions
-  const fetchShortsFromChannel = async () => {
-    if (!channelUrl.trim()) {
-      toast({ title: 'Error', description: 'Please enter a channel URL', variant: 'destructive' });
-      return;
-    }
-    
+  const fetchFromAllMappings = async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/videos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'fetch', channelUrl })
+        body: JSON.stringify({ action: 'fetch-all' })
       });
       
       const data = await res.json();
@@ -227,6 +264,32 @@ export default function YouTubeShortsRepublisher() {
         toast({ title: 'Success', description: data.message });
         fetchShorts();
         fetchStats();
+        fetchMappings();
+      } else {
+        toast({ title: 'Error', description: data.error, variant: 'destructive' });
+      }
+    } catch (error) {
+      toast({ title: 'Error', description: 'Failed to fetch shorts', variant: 'destructive' });
+    }
+    setLoading(false);
+  };
+  
+  const fetchFromMapping = async (mappingId: string, channelUrl: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/videos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'fetch', channelUrl, mappingId })
+      });
+      
+      const data = await res.json();
+      
+      if (data.success) {
+        toast({ title: 'Success', description: data.message });
+        fetchShorts();
+        fetchStats();
+        fetchMappings();
       } else {
         toast({ title: 'Error', description: data.error, variant: 'destructive' });
       }
@@ -249,10 +312,7 @@ export default function YouTubeShortsRepublisher() {
       const data = await res.json();
       
       if (data.success) {
-        toast({ 
-          title: 'Success', 
-          description: `Video uploaded successfully!` 
-        });
+        toast({ title: 'Success', description: 'Video uploaded successfully!' });
         fetchShorts();
         fetchStats();
       } else {
@@ -303,6 +363,76 @@ export default function YouTubeShortsRepublisher() {
     setLoading(false);
   };
   
+  const saveMapping = async () => {
+    if (!newMapping.name || !newMapping.source_channel_url || !newMapping.target_channel_id) {
+      toast({ title: 'Error', description: 'Please fill all required fields', variant: 'destructive' });
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      const res = await fetch('/api/mappings', {
+        method: editingMapping ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingMapping ? { id: editingMapping.id, ...newMapping } : newMapping)
+      });
+      
+      const data = await res.json();
+      
+      if (data.success) {
+        toast({ title: 'Success', description: editingMapping ? 'Mapping updated' : 'Mapping created' });
+        fetchMappings();
+        setShowMappingDialog(false);
+        setEditingMapping(null);
+        setNewMapping({
+          name: '',
+          source_channel_url: '',
+          target_channel_id: '',
+          uploads_per_day: 2,
+          default_visibility: 'public',
+          ai_enhancement_enabled: false
+        });
+      } else {
+        toast({ title: 'Error', description: data.error, variant: 'destructive' });
+      }
+    } catch (error) {
+      toast({ title: 'Error', description: 'Failed to save mapping', variant: 'destructive' });
+    }
+    setLoading(false);
+  };
+  
+  const deleteMapping = async (id: string) => {
+    if (!confirm('Delete this channel mapping?')) return;
+    
+    try {
+      const res = await fetch(`/api/mappings?id=${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      
+      if (data.success) {
+        toast({ title: 'Deleted', description: 'Mapping removed' });
+        fetchMappings();
+      }
+    } catch (error) {
+      toast({ title: 'Error', description: 'Failed to delete', variant: 'destructive' });
+    }
+  };
+  
+  const toggleMapping = async (id: string, isActive: boolean) => {
+    try {
+      const res = await fetch('/api/mappings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, is_active: isActive })
+      });
+      
+      if ((await res.json()).success) {
+        fetchMappings();
+      }
+    } catch (error) {
+      console.error('Failed to toggle mapping:', error);
+    }
+  };
+  
   const triggerScheduler = async () => {
     try {
       const res = await fetch('/api/scheduler', {
@@ -316,16 +446,10 @@ export default function YouTubeShortsRepublisher() {
       if (data.success) {
         toast({ title: 'Started', description: 'Scheduler run initiated' });
         fetchStats();
-      } else {
-        toast({ title: 'Error', description: data.error, variant: 'destructive' });
       }
     } catch (error) {
       toast({ title: 'Error', description: 'Failed to trigger scheduler', variant: 'destructive' });
     }
-  };
-  
-  const toggleAutomation = async (enabled: boolean) => {
-    setConfig({ ...config, automation_enabled: enabled ? 'true' : 'false' });
   };
   
   // Filter shorts
@@ -354,49 +478,67 @@ export default function YouTubeShortsRepublisher() {
     );
   };
   
-  // Format date
   const formatDate = (date: string | null) => {
     if (!date) return '-';
     return new Date(date).toLocaleString();
   };
   
+  const openMappingDialog = (mapping?: ChannelMapping) => {
+    if (mapping) {
+      setEditingMapping(mapping);
+      setNewMapping({
+        name: mapping.name,
+        source_channel_url: mapping.source_channel_url,
+        target_channel_id: mapping.target_channel_id,
+        uploads_per_day: mapping.uploads_per_day,
+        default_visibility: mapping.default_visibility,
+        ai_enhancement_enabled: mapping.ai_enhancement_enabled
+      });
+    } else {
+      setEditingMapping(null);
+      setNewMapping({
+        name: '',
+        source_channel_url: '',
+        target_channel_id: '',
+        uploads_per_day: 2,
+        default_visibility: 'public',
+        ai_enhancement_enabled: false
+      });
+    }
+    setShowMappingDialog(true);
+  };
+  
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background flex flex-col">
       {/* Premium Header */}
       <header className="sticky top-0 z-50 w-full border-b bg-background/80 backdrop-blur-xl">
-        <div className="container mx-auto px-6 lg:px-12">
-          <div className="flex h-16 items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center justify-center w-10 h-10 rounded-xl gradient-bg shadow-lg shadow-primary/25">
-                <Youtube className="w-5 h-5 text-white" />
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex h-14 items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center w-9 h-9 rounded-lg gradient-bg shadow-md shadow-primary/20">
+                <Globe className="w-4 h-4 text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold tracking-tight">
-                  <span className="gradient-text">Shorts</span> Republisher
+                <h1 className="text-lg font-bold tracking-tight">
+                  <span className="gradient-text font-extrabold">GRAVIX</span>
                 </h1>
-                <p className="text-xs text-muted-foreground hidden sm:block">Automated YouTube Shorts Management</p>
               </div>
             </div>
             
-            <div className="flex items-center gap-3">
-              {/* Automation Toggle */}
-              <div className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-muted/50">
-                <span className="text-xs font-medium text-muted-foreground">Auto</span>
-                <Switch 
-                  checked={config.automation_enabled === 'true'}
-                  onCheckedChange={toggleAutomation}
-                  className="scale-75"
-                />
+            <div className="flex items-center gap-2">
+              <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-full bg-muted/50 text-xs">
+                <span className="text-muted-foreground">{stats.pending} pending</span>
+                <Separator orientation="vertical" className="h-4" />
+                <span className="text-muted-foreground">{stats.uploadedToday} today</span>
               </div>
               
               <Button 
                 variant="ghost" 
                 size="sm" 
-                onClick={() => { fetchStats(); fetchShorts(); fetchConfig(); }}
-                className="gap-2"
+                onClick={() => { fetchStats(); fetchShorts(); fetchMappings(); }}
+                className="h-8 w-8 p-0"
               >
                 <RefreshCw className="w-4 h-4" />
-                <span className="hidden sm:inline">Refresh</span>
               </Button>
               
               <ThemeToggle />
@@ -406,208 +548,185 @@ export default function YouTubeShortsRepublisher() {
       </header>
       
       {/* Main Content */}
-      <main className="container mx-auto px-6 lg:px-12 py-8">
+      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
-            <TabsList className="bg-muted/50 p-1 rounded-xl">
-              <TabsTrigger value="dashboard" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm gap-2">
-                <Activity className="w-4 h-4" />
-                <span className="hidden sm:inline">Dashboard</span>
-              </TabsTrigger>
-              <TabsTrigger value="videos" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm gap-2">
-                <Video className="w-4 h-4" />
-                <span className="hidden sm:inline">Videos</span>
-              </TabsTrigger>
-              <TabsTrigger value="config" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm gap-2">
-                <Settings className="w-4 h-4" />
-                <span className="hidden sm:inline">Config</span>
-              </TabsTrigger>
-              <TabsTrigger value="scheduler" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm gap-2">
-                <Clock className="w-4 h-4" />
-                <span className="hidden sm:inline">Scheduler</span>
-              </TabsTrigger>
-              <TabsTrigger value="logs" className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm gap-2">
-                <Eye className="w-4 h-4" />
-                <span className="hidden sm:inline">Logs</span>
-              </TabsTrigger>
-            </TabsList>
-            
-            {/* Quick Stats */}
-            <div className="flex items-center gap-4 text-sm">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                <span className="text-muted-foreground">{stats.pending} pending</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-muted-foreground">{stats.uploadedToday} today</span>
-              </div>
-            </div>
-          </div>
+          <TabsList className="bg-muted/50 p-1 rounded-lg mb-6">
+            <TabsTrigger value="dashboard" className="rounded-md text-xs sm:text-sm data-[state=active]:bg-background data-[state=active]:shadow-sm gap-1.5">
+              <Activity className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Dashboard</span>
+            </TabsTrigger>
+            <TabsTrigger value="mappings" className="rounded-md text-xs sm:text-sm data-[state=active]:bg-background data-[state=active]:shadow-sm gap-1.5">
+              <Link2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Mappings</span>
+            </TabsTrigger>
+            <TabsTrigger value="videos" className="rounded-md text-xs sm:text-sm data-[state=active]:bg-background data-[state=active]:shadow-sm gap-1.5">
+              <Video className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Videos</span>
+            </TabsTrigger>
+            <TabsTrigger value="config" className="rounded-md text-xs sm:text-sm data-[state=active]:bg-background data-[state=active]:shadow-sm gap-1.5">
+              <Settings className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Config</span>
+            </TabsTrigger>
+            <TabsTrigger value="logs" className="rounded-md text-xs sm:text-sm data-[state=active]:bg-background data-[state=active]:shadow-sm gap-1.5">
+              <Eye className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Logs</span>
+            </TabsTrigger>
+          </TabsList>
           
           {/* Dashboard Tab */}
-          <TabsContent value="dashboard" className="space-y-8">
+          <TabsContent value="dashboard" className="space-y-6">
             {/* Stats Grid */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-              <Card className="relative overflow-hidden card-hover">
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Total</p>
-                      <p className="text-3xl font-bold mt-1">{stats.total}</p>
-                    </div>
-                    <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
-                      <Database className="w-6 h-6 text-primary" />
-                    </div>
-                  </div>
+            <div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
+              <Card className="overflow-hidden">
+                <CardContent className="p-4">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Total</p>
+                  <p className="text-2xl font-bold mt-1">{stats.total}</p>
                 </CardContent>
               </Card>
               
-              <Card className="relative overflow-hidden card-hover">
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Pending</p>
-                      <p className="text-3xl font-bold mt-1 text-amber-500">{stats.pending}</p>
-                    </div>
-                    <div className="w-12 h-12 rounded-xl bg-amber-500/10 flex items-center justify-center">
-                      <Timer className="w-6 h-6 text-amber-500" />
-                    </div>
-                  </div>
+              <Card className="overflow-hidden">
+                <CardContent className="p-4">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Pending</p>
+                  <p className="text-2xl font-bold mt-1 text-amber-500">{stats.pending}</p>
                 </CardContent>
               </Card>
               
-              <Card className="relative overflow-hidden card-hover">
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Uploaded</p>
-                      <p className="text-3xl font-bold mt-1 text-emerald-500">{stats.uploaded}</p>
-                    </div>
-                    <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-                      <CheckCircle2 className="w-6 h-6 text-emerald-500" />
-                    </div>
-                  </div>
+              <Card className="overflow-hidden">
+                <CardContent className="p-4">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Uploaded</p>
+                  <p className="text-2xl font-bold mt-1 text-emerald-500">{stats.uploaded}</p>
                 </CardContent>
               </Card>
               
-              <Card className="relative overflow-hidden card-hover">
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Failed</p>
-                      <p className="text-3xl font-bold mt-1 text-red-500">{stats.failed}</p>
-                    </div>
-                    <div className="w-12 h-12 rounded-xl bg-red-500/10 flex items-center justify-center">
-                      <XCircle className="w-6 h-6 text-red-500" />
-                    </div>
-                  </div>
+              <Card className="overflow-hidden">
+                <CardContent className="p-4">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Failed</p>
+                  <p className="text-2xl font-bold mt-1 text-red-500">{stats.failed}</p>
                 </CardContent>
               </Card>
               
-              <Card className="relative overflow-hidden card-hover col-span-2 lg:col-span-1">
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Today</p>
-                      <p className="text-3xl font-bold mt-1 text-primary">{stats.uploadedToday}</p>
-                    </div>
-                    <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
-                      <TrendingUp className="w-6 h-6 text-primary" />
-                    </div>
-                  </div>
+              <Card className="overflow-hidden">
+                <CardContent className="p-4">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Today</p>
+                  <p className="text-2xl font-bold mt-1 text-primary">{stats.uploadedToday}</p>
+                </CardContent>
+              </Card>
+              
+              <Card className="overflow-hidden">
+                <CardContent className="p-4">
+                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Mappings</p>
+                  <p className="text-2xl font-bold mt-1 text-violet-500">{stats.activeMappings}</p>
                 </CardContent>
               </Card>
             </div>
             
             {/* Quick Actions */}
-            <Card className="gradient-border">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Zap className="w-5 h-5 text-primary" />
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-primary" />
                   Quick Actions
                 </CardTitle>
-                <CardDescription>Fetch shorts from a YouTube channel and manage uploads</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="flex flex-col sm:flex-row gap-4">
-                  <div className="flex-1">
-                    <Label htmlFor="channel-url" className="text-sm font-medium">Source Channel</Label>
-                    <div className="flex gap-2 mt-2">
-                      <Input
-                        id="channel-url"
-                        placeholder="https://youtube.com/@channelname"
-                        value={channelUrl}
-                        onChange={(e) => setChannelUrl(e.target.value)}
-                        className="flex-1"
-                      />
-                      <Button onClick={fetchShortsFromChannel} disabled={loading} className="gradient-bg text-white shadow-lg shadow-primary/25 hover:shadow-primary/40 transition-all">
-                        {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
-                        <span className="hidden sm:inline">Fetch</span>
-                      </Button>
-                    </div>
+              <CardContent className="flex flex-wrap gap-2">
+                <Button onClick={fetchFromAllMappings} disabled={loading} className="gradient-bg text-white">
+                  {loading ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <Download className="w-4 h-4 mr-2" />}
+                  Fetch All Channels
+                </Button>
+                <Button variant="outline" onClick={triggerScheduler}>
+                  <Play className="w-4 h-4 mr-2 text-emerald-500" />
+                  Run Scheduler
+                </Button>
+                <Button variant="outline" onClick={() => processShort(shorts.find(s => s.status === 'Pending')?.id || '')}>
+                  <Upload className="w-4 h-4 mr-2 text-blue-500" />
+                  Upload Next
+                </Button>
+                <Button variant="outline" onClick={() => setActiveTab('mappings')}>
+                  <Link2 className="w-4 h-4 mr-2" />
+                  Manage Mappings
+                </Button>
+              </CardContent>
+            </Card>
+            
+            {/* Channel Mappings Overview */}
+            <Card>
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-base">Active Mappings</CardTitle>
+                  <Button size="sm" variant="outline" onClick={() => openMappingDialog()}>
+                    <Plus className="w-4 h-4 mr-1" />
+                    Add
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {channelMappings.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Link2 className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                    <p className="text-sm">No channel mappings yet</p>
+                    <Button size="sm" variant="outline" className="mt-3" onClick={() => openMappingDialog()}>
+                      Create First Mapping
+                    </Button>
                   </div>
-                </div>
-                
-                <Separator />
-                
-                <div className="flex flex-wrap gap-3">
-                  <Button variant="outline" onClick={triggerScheduler} className="gap-2">
-                    <Play className="w-4 h-4 text-emerald-500" />
-                    Run Scheduler
-                  </Button>
-                  <Button variant="outline" onClick={() => processShort(shorts.find(s => s.status === 'Pending')?.id || '')} className="gap-2">
-                    <Upload className="w-4 h-4 text-blue-500" />
-                    Upload Next
-                  </Button>
-                  <Button variant="outline" onClick={() => setActiveTab('config')} className="gap-2">
-                    <Settings className="w-4 h-4" />
-                    Settings
-                  </Button>
-                </div>
+                ) : (
+                  <div className="space-y-2">
+                    {channelMappings.slice(0, 5).map((mapping) => (
+                      <div key={mapping.id} className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
+                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                          <Youtube className="w-4 h-4 text-primary" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-sm truncate">{mapping.name}</p>
+                          <p className="text-xs text-muted-foreground flex items-center gap-1">
+                            <span className="truncate max-w-[120px]">{mapping.source_channel_url}</span>
+                            <ArrowRight className="w-3 h-3 flex-shrink-0" />
+                            <span className="truncate max-w-[80px]">{mapping.target_channel_id}</span>
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={mapping.is_active ? 'default' : 'secondary'} className="text-xs">
+                            {mapping.is_active ? 'Active' : 'Paused'}
+                          </Badge>
+                          <Button size="sm" variant="ghost" onClick={() => fetchFromMapping(mapping.id, mapping.source_channel_url)}>
+                            <Download className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                    {channelMappings.length > 5 && (
+                      <Button variant="ghost" className="w-full text-sm" onClick={() => setActiveTab('mappings')}>
+                        View all {channelMappings.length} mappings
+                      </Button>
+                    )}
+                  </div>
+                )}
               </CardContent>
             </Card>
             
             {/* Recent Activity */}
             <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Activity className="w-5 h-5" />
-                  Recent Activity
-                </CardTitle>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Recent Activity</CardTitle>
               </CardHeader>
               <CardContent>
-                <ScrollArea className="h-72 scrollbar-thin">
+                <ScrollArea className="h-48">
                   {logs.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                      <AlertCircle className="w-12 h-12 mb-4 opacity-50" />
-                      <p>No recent activity</p>
+                    <div className="text-center py-6 text-muted-foreground">
+                      <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No recent activity</p>
                     </div>
                   ) : (
-                    <div className="space-y-3">
-                      {logs.map((log) => (
-                        <div key={log.id} className="flex items-start gap-3 p-3 rounded-xl bg-muted/50 hover:bg-muted transition-colors">
+                    <div className="space-y-2">
+                      {logs.slice(0, 10).map((log) => (
+                        <div key={log.id} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50 text-sm">
                           {log.status === 'success' ? (
-                            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
-                              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                            </div>
+                            <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
                           ) : (
-                            <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center flex-shrink-0">
-                              <XCircle className="w-4 h-4 text-red-500" />
-                            </div>
+                            <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
                           )}
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium text-sm">{log.action}</span>
-                              <Badge variant="outline" className={`text-xs ${log.status === 'success' ? 'border-emerald-500/30 text-emerald-600' : 'border-red-500/30 text-red-600'}`}>
-                                {log.status}
-                              </Badge>
-                            </div>
-                            {log.message && (
-                              <p className="text-sm text-muted-foreground mt-1 truncate">{log.message}</p>
-                            )}
-                          </div>
-                          <span className="text-xs text-muted-foreground flex-shrink-0">
+                          <span className="font-medium">{log.action}</span>
+                          {log.message && <span className="text-muted-foreground truncate">- {log.message}</span>}
+                          <span className="text-xs text-muted-foreground ml-auto flex-shrink-0">
                             {new Date(log.created_at).toLocaleTimeString()}
                           </span>
                         </div>
@@ -619,27 +738,114 @@ export default function YouTubeShortsRepublisher() {
             </Card>
           </TabsContent>
           
+          {/* Mappings Tab */}
+          <TabsContent value="mappings" className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Channel Mappings</h2>
+                <p className="text-sm text-muted-foreground">Link source channels to destination channels</p>
+              </div>
+              <Button onClick={() => openMappingDialog()} className="gradient-bg text-white">
+                <Plus className="w-4 h-4 mr-2" />
+                New Mapping
+              </Button>
+            </div>
+            
+            {channelMappings.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <Link2 className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
+                  <h3 className="font-medium mb-2">No channel mappings</h3>
+                  <p className="text-sm text-muted-foreground mb-4">Create a mapping to link source and destination channels</p>
+                  <Button onClick={() => openMappingDialog()} className="gradient-bg text-white">
+                    <Plus className="w-4 h-4 mr-2" />
+                    Create Mapping
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                {channelMappings.map((mapping) => (
+                  <Card key={mapping.id} className={!mapping.is_active ? 'opacity-60' : ''}>
+                    <CardHeader className="pb-3">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-base">{mapping.name}</CardTitle>
+                        <div className="flex items-center gap-1">
+                          <Switch 
+                            checked={mapping.is_active} 
+                            onCheckedChange={(checked) => toggleMapping(mapping.id, checked)}
+                            className="scale-75"
+                          />
+                          <Button size="sm" variant="ghost" onClick={() => openMappingDialog(mapping)}>
+                            <Edit className="w-4 h-4" />
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => deleteMapping(mapping.id)} className="text-red-500">
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <div className="flex items-center gap-2 text-sm">
+                        <div className="w-6 h-6 rounded bg-blue-500/10 flex items-center justify-center flex-shrink-0">
+                          <Download className="w-3 h-3 text-blue-500" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs text-muted-foreground">Source</p>
+                          <p className="truncate font-mono text-xs">{mapping.source_channel_url}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex justify-center">
+                        <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                      </div>
+                      
+                      <div className="flex items-center gap-2 text-sm">
+                        <div className="w-6 h-6 rounded bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
+                          <Upload className="w-3 h-3 text-emerald-500" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs text-muted-foreground">Destination</p>
+                          <p className="truncate font-mono text-xs">{mapping.target_channel_id}</p>
+                        </div>
+                      </div>
+                    </CardContent>
+                    <CardFooter className="pt-0 gap-2">
+                      <Button size="sm" variant="outline" className="flex-1" onClick={() => fetchFromMapping(mapping.id, mapping.source_channel_url)}>
+                        <Download className="w-3 h-3 mr-1" />
+                        Fetch
+                      </Button>
+                      <div className="text-xs text-muted-foreground">
+                        {mapping.uploads_per_day}/day
+                      </div>
+                    </CardFooter>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+          
           {/* Videos Tab */}
-          <TabsContent value="videos" className="space-y-6">
+          <TabsContent value="videos" className="space-y-4">
             <Card>
-              <CardHeader>
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <CardHeader className="pb-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
-                    <CardTitle>Video Library</CardTitle>
-                    <CardDescription>Manage your shorts collection</CardDescription>
+                    <CardTitle className="text-base">Video Library</CardTitle>
+                    <CardDescription className="text-sm">{filteredShorts.length} videos</CardDescription>
                   </div>
                   <div className="flex gap-2">
                     <div className="relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                       <Input
                         placeholder="Search..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="pl-9 w-48"
+                        className="pl-8 w-40 h-8"
                       />
                     </div>
                     <Select value={statusFilter} onValueChange={setStatusFilter}>
-                      <SelectTrigger className="w-32">
+                      <SelectTrigger className="w-28 h-8">
                         <SelectValue placeholder="Status" />
                       </SelectTrigger>
                       <SelectContent>
@@ -653,26 +859,23 @@ export default function YouTubeShortsRepublisher() {
                 </div>
               </CardHeader>
               <CardContent>
-                <ScrollArea className="h-[500px] scrollbar-thin">
+                <ScrollArea className="h-[400px]">
                   <Table>
                     <TableHeader>
                       <TableRow className="hover:bg-transparent">
-                        <TableHead className="w-20">Preview</TableHead>
+                        <TableHead className="w-16">Thumb</TableHead>
                         <TableHead>Title</TableHead>
-                        <TableHead className="w-20">Duration</TableHead>
-                        <TableHead className="w-28">Status</TableHead>
-                        <TableHead className="w-36">Uploaded</TableHead>
-                        <TableHead className="w-28 text-right">Actions</TableHead>
+                        <TableHead className="w-16">Time</TableHead>
+                        <TableHead className="w-24">Status</TableHead>
+                        <TableHead className="w-20 text-right">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {filteredShorts.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={6} className="text-center py-12">
-                            <div className="flex flex-col items-center text-muted-foreground">
-                              <Video className="w-12 h-12 mb-4 opacity-50" />
-                              <p>No videos found</p>
-                            </div>
+                          <TableCell colSpan={5} className="text-center py-8">
+                            <Video className="w-8 h-8 mx-auto mb-2 text-muted-foreground opacity-50" />
+                            <p className="text-sm text-muted-foreground">No videos found</p>
                           </TableCell>
                         </TableRow>
                       ) : (
@@ -682,60 +885,34 @@ export default function YouTubeShortsRepublisher() {
                               <img 
                                 src={short.thumbnail_url || '/placeholder.png'} 
                                 alt={short.title}
-                                className="w-16 h-10 object-cover rounded-md"
+                                className="w-12 h-8 object-cover rounded"
                               />
                             </TableCell>
                             <TableCell>
-                              <div className="max-w-xs">
-                                <p className="font-medium truncate group-hover:text-primary transition-colors">{short.title}</p>
-                                <p className="text-xs text-muted-foreground font-mono">{short.video_id}</p>
-                              </div>
+                              <p className="font-medium text-sm truncate max-w-[200px]">{short.title}</p>
+                              <p className="text-xs text-muted-foreground font-mono">{short.video_id}</p>
                             </TableCell>
                             <TableCell>
-                              <Badge variant="outline" className="font-mono text-xs">
-                                {short.duration}s
-                              </Badge>
+                              <Badge variant="outline" className="font-mono text-xs">{short.duration}s</Badge>
                             </TableCell>
                             <TableCell>{getStatusBadge(short.status)}</TableCell>
-                            <TableCell className="text-sm text-muted-foreground">{formatDate(short.uploaded_date)}</TableCell>
                             <TableCell className="text-right">
-                              <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <Button 
-                                  size="icon" 
-                                  variant="ghost"
-                                  onClick={() => { setSelectedShort(short); setShowDetails(true); }}
-                                  className="h-8 w-8"
-                                >
-                                  <Eye className="w-4 h-4" />
+                              <div className="flex justify-end gap-1">
+                                <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => { setSelectedShort(short); setShowDetails(true); }}>
+                                  <Eye className="w-3.5 h-3.5" />
                                 </Button>
                                 {short.status === 'Pending' && (
-                                  <Button 
-                                    size="icon" 
-                                    variant="ghost"
-                                    onClick={() => processShort(short.id)}
-                                    disabled={loading}
-                                    className="h-8 w-8 text-primary"
-                                  >
-                                    <Upload className="w-4 h-4" />
+                                  <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-primary" onClick={() => processShort(short.id)}>
+                                    <Upload className="w-3.5 h-3.5" />
                                   </Button>
                                 )}
                                 {short.target_video_id && (
-                                  <Button 
-                                    size="icon" 
-                                    variant="ghost"
-                                    onClick={() => window.open(`https://youtube.com/watch?v=${short.target_video_id}`, '_blank')}
-                                    className="h-8 w-8 text-blue-500"
-                                  >
-                                    <ExternalLink className="w-4 h-4" />
+                                  <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-blue-500" onClick={() => window.open(`https://youtube.com/watch?v=${short.target_video_id}`, '_blank')}>
+                                    <ExternalLink className="w-3.5 h-3.5" />
                                   </Button>
                                 )}
-                                <Button 
-                                  size="icon" 
-                                  variant="ghost"
-                                  onClick={() => deleteShort(short.id)}
-                                  className="h-8 w-8 text-red-500 hover:text-red-600"
-                                >
-                                  <Trash2 className="w-4 h-4" />
+                                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500" onClick={() => deleteShort(short.id)}>
+                                  <Trash2 className="w-3.5 h-3.5" />
                                 </Button>
                               </div>
                             </TableCell>
@@ -750,140 +927,50 @@ export default function YouTubeShortsRepublisher() {
           </TabsContent>
           
           {/* Configuration Tab */}
-          <TabsContent value="config" className="space-y-6">
-            <div className="grid gap-6 lg:grid-cols-2">
-              {/* YouTube API Configuration */}
-              <Card className="card-hover">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center">
-                      <Youtube className="w-4 h-4 text-red-500" />
-                    </div>
+          <TabsContent value="config" className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Youtube className="w-4 h-4 text-red-500" />
                     YouTube API
                   </CardTitle>
-                  <CardDescription>Configure YouTube Data API and OAuth credentials</CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-4">
+                <CardContent className="space-y-3">
                   <div>
-                    <Label htmlFor="youtube_api_key" className="text-sm">API Key</Label>
-                    <Input
-                      id="youtube_api_key"
-                      type="password"
-                      placeholder="AIza..."
-                      value={config.youtube_api_key || ''}
-                      onChange={(e) => setConfig({ ...config, youtube_api_key: e.target.value })}
-                      className="mt-1.5"
-                    />
+                    <Label className="text-xs">API Key</Label>
+                    <Input type="password" placeholder="AIza..." value={config.youtube_api_key || ''} onChange={(e) => setConfig({ ...config, youtube_api_key: e.target.value })} className="h-8 mt-1" />
                   </div>
                   <div>
-                    <Label htmlFor="youtube_client_id" className="text-sm">OAuth Client ID</Label>
-                    <Input
-                      id="youtube_client_id"
-                      placeholder="xxx.apps.googleusercontent.com"
-                      value={config.youtube_client_id || ''}
-                      onChange={(e) => setConfig({ ...config, youtube_client_id: e.target.value })}
-                      className="mt-1.5"
-                    />
+                    <Label className="text-xs">OAuth Client ID</Label>
+                    <Input placeholder="xxx.apps.googleusercontent.com" value={config.youtube_client_id || ''} onChange={(e) => setConfig({ ...config, youtube_client_id: e.target.value })} className="h-8 mt-1" />
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <Label htmlFor="youtube_client_secret" className="text-sm">Client Secret</Label>
-                      <Input
-                        id="youtube_client_secret"
-                        type="password"
-                        placeholder="GOCSPX-..."
-                        value={config.youtube_client_secret || ''}
-                        onChange={(e) => setConfig({ ...config, youtube_client_secret: e.target.value })}
-                        className="mt-1.5"
-                      />
+                      <Label className="text-xs">Client Secret</Label>
+                      <Input type="password" placeholder="GOCSPX-..." value={config.youtube_client_secret || ''} onChange={(e) => setConfig({ ...config, youtube_client_secret: e.target.value })} className="h-8 mt-1" />
                     </div>
                     <div>
-                      <Label htmlFor="youtube_refresh_token" className="text-sm">Refresh Token</Label>
-                      <Input
-                        id="youtube_refresh_token"
-                        type="password"
-                        placeholder="1//..."
-                        value={config.youtube_refresh_token || ''}
-                        onChange={(e) => setConfig({ ...config, youtube_refresh_token: e.target.value })}
-                        className="mt-1.5"
-                      />
+                      <Label className="text-xs">Refresh Token</Label>
+                      <Input type="password" placeholder="1//..." value={config.youtube_refresh_token || ''} onChange={(e) => setConfig({ ...config, youtube_refresh_token: e.target.value })} className="h-8 mt-1" />
                     </div>
                   </div>
                 </CardContent>
               </Card>
               
-              {/* Channel Settings */}
-              <Card className="card-hover">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
-                      <Users className="w-4 h-4 text-blue-500" />
-                    </div>
-                    Channels
-                  </CardTitle>
-                  <CardDescription>Source and target channel configuration</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div>
-                    <Label htmlFor="source_channel_id" className="text-sm">Source Channel</Label>
-                    <Input
-                      id="source_channel_id"
-                      placeholder="https://youtube.com/@channel"
-                      value={config.source_channel_id || ''}
-                      onChange={(e) => setConfig({ ...config, source_channel_id: e.target.value })}
-                      className="mt-1.5"
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="target_channel_id" className="text-sm">Target Channel ID</Label>
-                    <Input
-                      id="target_channel_id"
-                      placeholder="UC..."
-                      value={config.target_channel_id || ''}
-                      onChange={(e) => setConfig({ ...config, target_channel_id: e.target.value })}
-                      className="mt-1.5"
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-              
-              {/* Upload Settings */}
-              <Card className="card-hover">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
-                      <Upload className="w-4 h-4 text-emerald-500" />
-                    </div>
-                    Upload Settings
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Settings className="w-4 h-4" />
+                    Global Settings
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <Label className="text-sm">Uploads/Day</Label>
-                      <Select 
-                        value={config.uploads_per_day || '2'} 
-                        onValueChange={(value) => setConfig({ ...config, uploads_per_day: value })}
-                      >
-                        <SelectTrigger className="mt-1.5">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {[1,2,3,4,5,6,8,10].map(n => (
-                            <SelectItem key={n} value={n.toString()}>{n}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div>
-                      <Label className="text-sm">Visibility</Label>
-                      <Select 
-                        value={config.default_visibility || 'public'} 
-                        onValueChange={(value) => setConfig({ ...config, default_visibility: value })}
-                      >
-                        <SelectTrigger className="mt-1.5">
-                          <SelectValue />
-                        </SelectTrigger>
+                      <Label className="text-xs">Default Visibility</Label>
+                      <Select value={config.default_visibility || 'public'} onValueChange={(v) => setConfig({ ...config, default_visibility: v })}>
+                        <SelectTrigger className="h-8 mt-1"><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="public">Public</SelectItem>
                           <SelectItem value="unlisted">Unlisted</SelectItem>
@@ -891,202 +978,62 @@ export default function YouTubeShortsRepublisher() {
                         </SelectContent>
                       </Select>
                     </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <Label htmlFor="upload_time_morning" className="text-sm">Morning</Label>
-                      <Input
-                        id="upload_time_morning"
-                        type="time"
-                        value={config.upload_time_morning || '09:00'}
-                        onChange={(e) => setConfig({ ...config, upload_time_morning: e.target.value })}
-                        className="mt-1.5"
-                      />
-                    </div>
-                    <div>
-                      <Label htmlFor="upload_time_evening" className="text-sm">Evening</Label>
-                      <Input
-                        id="upload_time_evening"
-                        type="time"
-                        value={config.upload_time_evening || '18:00'}
-                        onChange={(e) => setConfig({ ...config, upload_time_evening: e.target.value })}
-                        className="mt-1.5"
-                      />
+                      <Label className="text-xs">Max Retries</Label>
+                      <Select value={config.max_retry_count || '3'} onValueChange={(v) => setConfig({ ...config, max_retry_count: v })}>
+                        <SelectTrigger className="h-8 mt-1"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {[1,2,3,5].map(n => <SelectItem key={n} value={n.toString()}>{n}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
-              
-              {/* AI Enhancement */}
-              <Card className="card-hover">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center">
-                      <Sparkles className="w-4 h-4 text-violet-500" />
-                    </div>
-                    AI Enhancement
-                  </CardTitle>
-                  <CardDescription>Use AI to optimize content</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="flex items-center justify-between p-4 rounded-xl bg-muted/50">
+                  <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
                     <div>
-                      <Label className="font-medium">Enable AI Enhancement</Label>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        Auto-generate optimized titles & hashtags
-                      </p>
+                      <Label className="text-sm font-medium">Enable Automation</Label>
+                      <p className="text-xs text-muted-foreground">Run scheduler automatically</p>
                     </div>
-                    <Switch 
-                      checked={config.ai_enhancement_enabled === 'true'}
-                      onCheckedChange={(checked) => setConfig({ ...config, ai_enhancement_enabled: checked ? 'true' : 'false' })}
-                    />
+                    <Switch checked={config.automation_enabled === 'true'} onCheckedChange={(c) => setConfig({ ...config, automation_enabled: c ? 'true' : 'false' })} />
                   </div>
                 </CardContent>
               </Card>
             </div>
             
-            {/* Save Button */}
-            <Button onClick={saveConfig} disabled={loading} size="lg" className="w-full gradient-bg text-white shadow-lg shadow-primary/25 hover:shadow-primary/40 transition-all">
+            <Button onClick={saveConfig} disabled={loading} className="w-full gradient-bg text-white">
               {loading ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
               Save Configuration
             </Button>
           </TabsContent>
           
-          {/* Scheduler Tab */}
-          <TabsContent value="scheduler" className="space-y-6">
-            <div className="grid gap-6 lg:grid-cols-2">
-              <Card className="card-hover">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Clock className="w-5 h-5" />
-                    Scheduler Status
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="p-4 rounded-xl bg-muted/50">
-                      <p className="text-xs text-muted-foreground uppercase tracking-wider">Status</p>
-                      <div className="flex items-center gap-2 mt-2">
-                        <span className={`w-2 h-2 rounded-full ${schedulerState?.is_running ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`} />
-                        <span className="font-semibold">{schedulerState?.is_running ? 'Running' : 'Idle'}</span>
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-xl bg-muted/50">
-                      <p className="text-xs text-muted-foreground uppercase tracking-wider">Today</p>
-                      <p className="font-semibold mt-2">
-                        {schedulerState?.uploads_today || 0} / {config.uploads_per_day || 2}
-                      </p>
-                    </div>
-                  </div>
-                  
-                  <div className="p-4 rounded-xl bg-muted/50">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wider">Last Run</p>
-                    <p className="font-medium mt-2">
-                      {schedulerState?.last_run_at ? formatDate(schedulerState.last_run_at) : 'Never'}
-                    </p>
-                  </div>
-                  
-                  <Separator />
-                  
-                  <div className="flex items-center justify-between p-4 rounded-xl bg-muted/50">
-                    <div>
-                      <Label className="font-medium">Automation</Label>
-                      <p className="text-sm text-muted-foreground">Enable scheduled uploads</p>
-                    </div>
-                    <Switch 
-                      checked={config.automation_enabled === 'true'}
-                      onCheckedChange={toggleAutomation}
-                    />
-                  </div>
-                  
-                  <div className="flex gap-3">
-                    <Button onClick={triggerScheduler} disabled={schedulerState?.is_running} className="gradient-bg text-white">
-                      <Play className="w-4 h-4 mr-2" />
-                      Run Now
-                    </Button>
-                    <Button variant="outline" onClick={fetchStats}>
-                      <RefreshCw className="w-4 h-4 mr-2" />
-                      Refresh
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-              
-              <Card className="card-hover">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Calendar className="w-5 h-5" />
-                    Schedule
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="flex items-center gap-4 p-4 rounded-xl bg-muted/50">
-                    <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center">
-                      <Sun className="w-5 h-5 text-blue-500" />
-                    </div>
-                    <div>
-                      <p className="font-medium">Morning Upload</p>
-                      <p className="text-sm text-muted-foreground">{config.upload_time_morning || '09:00'} UTC daily</p>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-center gap-4 p-4 rounded-xl bg-muted/50">
-                    <div className="w-10 h-10 rounded-xl bg-orange-500/10 flex items-center justify-center">
-                      <Moon className="w-5 h-5 text-orange-500" />
-                    </div>
-                    <div>
-                      <p className="font-medium">Evening Upload</p>
-                      <p className="text-sm text-muted-foreground">{config.upload_time_evening || '18:00'} UTC daily</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </TabsContent>
-          
           {/* Logs Tab */}
-          <TabsContent value="logs" className="space-y-6">
+          <TabsContent value="logs" className="space-y-4">
             <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Activity className="w-5 h-5" />
-                  Activity Logs
-                </CardTitle>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Activity Logs</CardTitle>
               </CardHeader>
               <CardContent>
-                <ScrollArea className="h-[500px] scrollbar-thin">
+                <ScrollArea className="h-[400px]">
                   {logs.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-                      <AlertCircle className="w-16 h-16 mb-4 opacity-50" />
-                      <p className="text-lg">No logs available</p>
-                      <p className="text-sm">Activity will appear here</p>
+                    <div className="text-center py-12 text-muted-foreground">
+                      <AlertCircle className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                      <p className="text-sm">No logs available</p>
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                       {logs.map((log) => (
-                        <div key={log.id} className="flex items-start gap-3 p-4 rounded-xl bg-muted/50 hover:bg-muted transition-colors">
+                        <div key={log.id} className="flex items-start gap-2 p-3 rounded-lg bg-muted/50">
                           {log.status === 'success' ? (
-                            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
-                              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                            </div>
+                            <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5" />
                           ) : (
-                            <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center flex-shrink-0">
-                              <XCircle className="w-5 h-5 text-red-500" />
-                            </div>
+                            <XCircle className="w-4 h-4 text-red-500 mt-0.5" />
                           )}
                           <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="font-semibold">{log.action}</span>
-                              <Badge variant={log.status === 'success' ? 'default' : 'destructive'} className="text-xs">
-                                {log.status}
-                              </Badge>
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-sm">{log.action}</span>
+                              <Badge variant={log.status === 'success' ? 'default' : 'destructive'} className="text-xs">{log.status}</Badge>
                             </div>
-                            {log.message && (
-                              <p className="text-sm text-muted-foreground">{log.message}</p>
-                            )}
-                            <p className="text-xs text-muted-foreground mt-2">
-                              {new Date(log.created_at).toLocaleString()}
-                            </p>
+                            {log.message && <p className="text-xs text-muted-foreground mt-1">{log.message}</p>}
+                            <p className="text-xs text-muted-foreground mt-1">{new Date(log.created_at).toLocaleString()}</p>
                           </div>
                         </div>
                       ))}
@@ -1099,105 +1046,115 @@ export default function YouTubeShortsRepublisher() {
         </Tabs>
       </main>
       
-      {/* Premium Footer */}
-      <footer className="border-t mt-12 py-6 bg-muted/30">
-        <div className="container mx-auto px-6 lg:px-12">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
-            <div className="flex items-center gap-2">
-              <Youtube className="w-4 h-4 text-primary" />
-              <span>YouTube Shorts Republisher v1.0</span>
-            </div>
-            <div className="flex items-center gap-4">
-              <span className="flex items-center gap-1">
-                <Shield className="w-4 h-4" />
-                Powered by Supabase
-              </span>
-            </div>
+      {/* Footer */}
+      <footer className="border-t py-4 bg-muted/30 mt-auto">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span className="font-semibold gradient-text">GRAVIX</span>
+            <span>YouTube Shorts Republisher v1.0</span>
           </div>
         </div>
       </footer>
       
+      {/* Mapping Dialog */}
+      <Dialog open={showMappingDialog} onOpenChange={setShowMappingDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingMapping ? 'Edit Mapping' : 'New Channel Mapping'}</DialogTitle>
+            <DialogDescription>Link a source channel to a destination channel</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Mapping Name *</Label>
+              <Input placeholder="My Channel Pair" value={newMapping.name} onChange={(e) => setNewMapping({ ...newMapping, name: e.target.value })} className="mt-1.5" />
+            </div>
+            
+            <div>
+              <Label>Source Channel URL *</Label>
+              <Input placeholder="https://youtube.com/@channelname" value={newMapping.source_channel_url} onChange={(e) => setNewMapping({ ...newMapping, source_channel_url: e.target.value })} className="mt-1.5" />
+              <p className="text-xs text-muted-foreground mt-1">The channel to fetch shorts from</p>
+            </div>
+            
+            <div>
+              <Label>Target Channel ID *</Label>
+              <Input placeholder="UC..." value={newMapping.target_channel_id} onChange={(e) => setNewMapping({ ...newMapping, target_channel_id: e.target.value })} className="mt-1.5" />
+              <p className="text-xs text-muted-foreground mt-1">Your channel ID to upload to</p>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Uploads/Day</Label>
+                <Select value={newMapping.uploads_per_day.toString()} onValueChange={(v) => setNewMapping({ ...newMapping, uploads_per_day: parseInt(v) })}>
+                  <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {[1,2,3,4,5,6,8,10].map(n => <SelectItem key={n} value={n.toString()}>{n}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Visibility</Label>
+                <Select value={newMapping.default_visibility} onValueChange={(v) => setNewMapping({ ...newMapping, default_visibility: v })}>
+                  <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="public">Public</SelectItem>
+                    <SelectItem value="unlisted">Unlisted</SelectItem>
+                    <SelectItem value="private">Private</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            
+            <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+              <div>
+                <Label className="font-medium">AI Enhancement</Label>
+                <p className="text-xs text-muted-foreground">Optimize titles & hashtags</p>
+              </div>
+              <Switch checked={newMapping.ai_enhancement_enabled} onCheckedChange={(c) => setNewMapping({ ...newMapping, ai_enhancement_enabled: c })} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowMappingDialog(false)}>Cancel</Button>
+            <Button onClick={saveMapping} disabled={loading} className="gradient-bg text-white">
+              {editingMapping ? 'Update' : 'Create'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
       {/* Details Dialog */}
       <Dialog open={showDetails} onOpenChange={setShowDetails}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Video Details</DialogTitle>
-            <DialogDescription>Full information about this short</DialogDescription>
           </DialogHeader>
           {selectedShort && (
-            <div className="space-y-4">
-              <div className="flex gap-4">
-                <img 
-                  src={selectedShort.thumbnail_url || '/placeholder.png'} 
-                  alt={selectedShort.title}
-                  className="w-32 h-20 object-cover rounded-xl"
-                />
-                <div className="flex-1">
-                  <h3 className="font-semibold text-lg">{selectedShort.title}</h3>
-                  <p className="text-sm text-muted-foreground font-mono">{selectedShort.video_id}</p>
-                  <div className="mt-2">{getStatusBadge(selectedShort.status)}</div>
+            <div className="space-y-3">
+              <div className="flex gap-3">
+                <img src={selectedShort.thumbnail_url || '/placeholder.png'} alt={selectedShort.title} className="w-24 h-14 object-cover rounded-lg" />
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium truncate">{selectedShort.title}</h3>
+                  <p className="text-xs text-muted-foreground font-mono">{selectedShort.video_id}</p>
+                  {getStatusBadge(selectedShort.status)}
                 </div>
               </div>
-              
               <Separator />
-              
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="p-3 rounded-lg bg-muted/50">
-                  <p className="text-muted-foreground">Duration</p>
-                  <p className="font-semibold">{selectedShort.duration}s</p>
-                </div>
-                <div className="p-3 rounded-lg bg-muted/50">
-                  <p className="text-muted-foreground">Retries</p>
-                  <p className="font-semibold">{selectedShort.retry_count}</p>
-                </div>
-                <div className="p-3 rounded-lg bg-muted/50">
-                  <p className="text-muted-foreground">Created</p>
-                  <p className="font-medium">{formatDate(selectedShort.created_at)}</p>
-                </div>
-                <div className="p-3 rounded-lg bg-muted/50">
-                  <p className="text-muted-foreground">Uploaded</p>
-                  <p className="font-medium">{formatDate(selectedShort.uploaded_date)}</p>
-                </div>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="p-2 rounded bg-muted/50"><p className="text-xs text-muted-foreground">Duration</p><p className="font-medium">{selectedShort.duration}s</p></div>
+                <div className="p-2 rounded bg-muted/50"><p className="text-xs text-muted-foreground">Retries</p><p className="font-medium">{selectedShort.retry_count}</p></div>
+                <div className="p-2 rounded bg-muted/50"><p className="text-xs text-muted-foreground">Created</p><p className="font-medium text-xs">{formatDate(selectedShort.created_at)}</p></div>
+                <div className="p-2 rounded bg-muted/50"><p className="text-xs text-muted-foreground">Uploaded</p><p className="font-medium text-xs">{formatDate(selectedShort.uploaded_date)}</p></div>
               </div>
-              
-              {selectedShort.description && (
-                <>
-                  <Separator />
-                  <div>
-                    <Label className="text-muted-foreground">Description</Label>
-                    <p className="text-sm mt-1 p-3 rounded-lg bg-muted/50">{selectedShort.description}</p>
-                  </div>
-                </>
-              )}
-              
-              {selectedShort.ai_title && (
-                <>
-                  <Separator />
-                  <div>
-                    <Label className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-violet-500" />
-                      AI Enhanced Title
-                    </Label>
-                    <p className="text-sm mt-1 p-3 rounded-lg bg-violet-500/10">{selectedShort.ai_title}</p>
-                  </div>
-                </>
-              )}
-              
               {selectedShort.error_log && (
                 <>
                   <Separator />
                   <div>
-                    <Label className="text-red-500">Error Log</Label>
-                    <p className="text-sm mt-1 p-3 rounded-lg bg-red-500/10 text-red-600">{selectedShort.error_log}</p>
+                    <Label className="text-red-500 text-xs">Error</Label>
+                    <p className="text-xs p-2 rounded bg-red-500/10 text-red-600 mt-1">{selectedShort.error_log}</p>
                   </div>
                 </>
               )}
-              
               {selectedShort.target_video_id && (
-                <Button 
-                  className="w-full gradient-bg text-white"
-                  onClick={() => window.open(`https://youtube.com/watch?v=${selectedShort.target_video_id}`, '_blank')}
-                >
+                <Button className="w-full gradient-bg text-white" onClick={() => window.open(`https://youtube.com/watch?v=${selectedShort.target_video_id}`, '_blank')}>
                   <ExternalLink className="w-4 h-4 mr-2" />
                   View on YouTube
                 </Button>

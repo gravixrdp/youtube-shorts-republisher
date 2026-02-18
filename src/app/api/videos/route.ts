@@ -5,7 +5,9 @@ import {
   getAllShorts, 
   updateShort, 
   deleteShort,
-  createLog 
+  createLog,
+  getChannelMappings,
+  updateLastFetched
 } from '@/lib/supabase/database';
 import { fetchShortsFromChannel } from '@/lib/youtube/scraper';
 
@@ -16,9 +18,9 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50');
     const offset = parseInt(searchParams.get('offset') || '0');
     const status = searchParams.get('status');
+    const mappingId = searchParams.get('mappingId');
     
     if (status) {
-      // Import additional function
       const { getShortsByStatus } = await import('@/lib/supabase/database');
       const shorts = await getShortsByStatus(status);
       return NextResponse.json({ success: true, shorts });
@@ -39,9 +41,9 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { action, channelUrl, ...data } = body;
+    const { action, channelUrl, mappingId, ...data } = body;
     
-    // Fetch shorts from channel
+    // Fetch shorts from specific channel (with mapping)
     if (action === 'fetch') {
       if (!channelUrl) {
         return NextResponse.json(
@@ -59,7 +61,7 @@ export async function POST(request: NextRequest) {
         );
       }
       
-      // Store shorts in database
+      // Store shorts in database with mapping
       let added = 0;
       let duplicates = 0;
       let errors = 0;
@@ -82,7 +84,9 @@ export async function POST(request: NextRequest) {
           thumbnail_url: short.thumbnailUrl,
           duration: short.duration,
           published_date: short.publishedDate,
-          status: 'Pending'
+          status: 'Pending',
+          mapping_id: mappingId || null,
+          source_channel: channelUrl
         });
         
         if (created) {
@@ -93,10 +97,68 @@ export async function POST(request: NextRequest) {
         }
       }
       
+      // Update last fetched time for mapping
+      if (mappingId) {
+        await updateLastFetched(mappingId);
+      }
+      
       return NextResponse.json({
         success: true,
         message: `Fetched ${result.shorts.length} shorts. Added: ${added}, Duplicates: ${duplicates}, Errors: ${errors}`,
         stats: { total: result.shorts.length, added, duplicates, errors }
+      });
+    }
+    
+    // Fetch from all active mappings
+    if (action === 'fetch-all') {
+      const mappings = await getChannelMappings();
+      const activeMappings = mappings.filter(m => m.is_active);
+      
+      let totalAdded = 0;
+      let totalDuplicates = 0;
+      let totalErrors = 0;
+      
+      for (const mapping of activeMappings) {
+        const result = await fetchShortsFromChannel(mapping.source_channel_url);
+        
+        if (!result.success) continue;
+        
+        for (const short of result.shorts) {
+          const existing = await getShortByVideoId(short.videoId);
+          if (existing) {
+            totalDuplicates++;
+            continue;
+          }
+          
+          const created = await createShort({
+            video_id: short.videoId,
+            video_url: short.videoUrl,
+            title: short.title,
+            description: short.description,
+            tags: short.tags,
+            thumbnail_url: short.thumbnailUrl,
+            duration: short.duration,
+            published_date: short.publishedDate,
+            status: 'Pending',
+            mapping_id: mapping.id,
+            source_channel: mapping.source_channel_url,
+            target_channel: mapping.target_channel_id
+          });
+          
+          if (created) {
+            totalAdded++;
+          } else {
+            totalErrors++;
+          }
+        }
+        
+        await updateLastFetched(mapping.id);
+      }
+      
+      return NextResponse.json({
+        success: true,
+        message: `Fetched from ${activeMappings.length} channels. Added: ${totalAdded}, Duplicates: ${totalDuplicates}, Errors: ${totalErrors}`,
+        stats: { channels: activeMappings.length, total: totalAdded + totalDuplicates + totalErrors, added: totalAdded, duplicates: totalDuplicates, errors: totalErrors }
       });
     }
     
@@ -128,7 +190,8 @@ export async function POST(request: NextRequest) {
         tags,
         thumbnail_url,
         duration,
-        status: 'Pending'
+        status: 'Pending',
+        mapping_id: mappingId || null
       });
       
       if (short) {
