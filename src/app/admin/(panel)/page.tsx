@@ -56,6 +56,7 @@ interface Short {
   mapping_id: string | null;
   source_channel: string | null;
   target_channel: string | null;
+  scheduled_date: string | null;
   uploaded_date: string | null;
   target_video_id: string | null;
   retry_count: number;
@@ -161,6 +162,25 @@ interface ScrapeRun {
   };
 }
 
+interface UpcomingUploadSlot {
+  id: string;
+  kind: 'mapping' | 'global';
+  mappingId: string | null;
+  mappingName: string;
+  slotLabel: string;
+  slotTime: string;
+  scheduledAt: number;
+  pendingCount: number;
+  nextVideoTitle: string | null;
+}
+
+interface ScheduledPublishItem {
+  id: string;
+  title: string;
+  mappingName: string;
+  scheduledAt: number;
+}
+
 type ActionKey =
   | 'refresh'
   | 'scrapeSource'
@@ -226,6 +246,102 @@ const DEFAULT_ACTION_LOAD: Record<ActionKey, boolean> = {
   deleteShort: false,
 };
 
+function normalizeTimeValue(raw: string | null | undefined, fallback: string): string {
+  if (!raw) return fallback;
+  const value = raw.trim();
+  if (!value) return fallback;
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value) ? value : fallback;
+}
+
+function getDatePartsInTimezone(date: Date, timeZone: string) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(date);
+  const map = new Map(parts.map((part) => [part.type, part.value]));
+
+  return {
+    year: Number.parseInt(map.get('year') || '0', 10),
+    month: Number.parseInt(map.get('month') || '1', 10),
+    day: Number.parseInt(map.get('day') || '1', 10),
+    hour: Number.parseInt(map.get('hour') || '0', 10),
+    minute: Number.parseInt(map.get('minute') || '0', 10),
+  };
+}
+
+function convertZonedDateTimeToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string
+): Date {
+  let utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+
+  for (let iteration = 0; iteration < 4; iteration++) {
+    const guessParts = getDatePartsInTimezone(new Date(utcGuess), timeZone);
+    const actualAsUtc = Date.UTC(
+      guessParts.year,
+      guessParts.month - 1,
+      guessParts.day,
+      guessParts.hour,
+      guessParts.minute,
+      0,
+      0
+    );
+    const targetAsUtc = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+    const delta = targetAsUtc - actualAsUtc;
+    if (delta === 0) break;
+    utcGuess += delta;
+  }
+
+  return new Date(utcGuess);
+}
+
+function getNextOccurrence(timeValue: string, timeZone: string, fromDate: Date): Date | null {
+  const [hourRaw, minuteRaw] = timeValue.split(':');
+  const hour = Number.parseInt(hourRaw || '', 10);
+  const minute = Number.parseInt(minuteRaw || '', 10);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return null;
+  }
+
+  const nowParts = getDatePartsInTimezone(fromDate, timeZone);
+  const todayCandidate = convertZonedDateTimeToUtc(
+    nowParts.year,
+    nowParts.month,
+    nowParts.day,
+    hour,
+    minute,
+    timeZone
+  );
+
+  if (todayCandidate.getTime() > fromDate.getTime()) {
+    return todayCandidate;
+  }
+
+  const todayUtc = new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 0, 0, 0, 0));
+  const tomorrowUtc = new Date(todayUtc.getTime() + 24 * 60 * 60 * 1000);
+
+  return convertZonedDateTimeToUtc(
+    tomorrowUtc.getUTCFullYear(),
+    tomorrowUtc.getUTCMonth() + 1,
+    tomorrowUtc.getUTCDate(),
+    hour,
+    minute,
+    timeZone
+  );
+}
+
 export default function GRAVIX() {
   const { toast } = useToast();
 
@@ -263,6 +379,7 @@ export default function GRAVIX() {
   const [activeDestinationId, setActiveDestinationId] = useState<string | null>(null);
   const [activeShortId, setActiveShortId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [clockNow, setClockNow] = useState(() => Date.now());
 
   const setActionState = useCallback((key: ActionKey, value: boolean) => {
     setActionLoad((prev) => ({ ...prev, [key]: value }));
@@ -451,6 +568,16 @@ export default function GRAVIX() {
       return next;
     });
   }, [destinationChannels]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClockNow(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const refreshAll = useCallback(async () => {
     setActionState('refresh', true);
@@ -1080,6 +1207,76 @@ export default function GRAVIX() {
   const recentLogs = useMemo(() => logs.slice(0, 12), [logs]);
   const dashboardMappings = useMemo(() => channelMappings.slice(0, 5), [channelMappings]);
   const pendingShort = useMemo(() => shorts.find((short) => short.status === 'Pending')?.id || '', [shorts]);
+  const schedulerTimezone = useMemo(() => (config.scheduler_timezone || 'UTC').trim() || 'UTC', [config.scheduler_timezone]);
+  const currentMinuteKey = useMemo(() => Math.floor(clockNow / 60000), [clockNow]);
+
+  const schedulerClockLabel = useMemo(() => {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: schedulerTimezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(new Date(clockNow));
+  }, [clockNow, schedulerTimezone]);
+
+  const schedulerClockDateLabel = useMemo(() => {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: schedulerTimezone,
+      weekday: 'short',
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+    }).format(new Date(clockNow));
+  }, [clockNow, schedulerTimezone]);
+
+  const localClockLabel = useMemo(() => {
+    return new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(new Date(clockNow));
+  }, [clockNow]);
+
+  const pendingByMapping = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const short of shorts) {
+      if (short.status !== 'Pending' || !short.mapping_id) {
+        continue;
+      }
+      counts.set(short.mapping_id, (counts.get(short.mapping_id) || 0) + 1);
+    }
+    return counts;
+  }, [shorts]);
+
+  const pendingGlobalQueue = useMemo(() => {
+    return shorts.filter((short) => short.status === 'Pending' && !short.mapping_id).length;
+  }, [shorts]);
+  const nextPendingTitleByMapping = useMemo(() => {
+    const sortedPending = shorts
+      .filter((short) => short.status === 'Pending' && !!short.mapping_id)
+      .slice()
+      .sort((first, second) => new Date(first.created_at).getTime() - new Date(second.created_at).getTime());
+
+    const map = new Map<string, string>();
+    for (const short of sortedPending) {
+      if (!short.mapping_id || map.has(short.mapping_id)) {
+        continue;
+      }
+      map.set(short.mapping_id, short.title);
+    }
+    return map;
+  }, [shorts]);
+  const nextGlobalPendingTitle = useMemo(() => {
+    const pendingGlobal = shorts
+      .filter((short) => short.status === 'Pending' && !short.mapping_id)
+      .slice()
+      .sort((first, second) => new Date(first.created_at).getTime() - new Date(second.created_at).getTime());
+
+    return pendingGlobal[0]?.title || null;
+  }, [shorts]);
+
   const destinationMappingCount = useMemo(() => {
     const map = new Map<string, number>();
     for (const mapping of channelMappings) {
@@ -1097,6 +1294,119 @@ export default function GRAVIX() {
   const destinationChannelById = useMemo(() => {
     return new Map(destinationChannels.map((channel) => [channel.channel_id, channel]));
   }, [destinationChannels]);
+  const mappingNameById = useMemo(() => {
+    return new Map(channelMappings.map((mapping) => [mapping.id, mapping.name]));
+  }, [channelMappings]);
+
+  const upcomingUploadSlots = useMemo(() => {
+    const now = new Date(currentMinuteKey * 60 * 1000);
+    const activeMappings = channelMappings.filter((mapping) => mapping.is_active);
+    const fallbackMorning = normalizeTimeValue(config.upload_time_morning, '09:00');
+    const fallbackEvening = normalizeTimeValue(config.upload_time_evening, '18:00');
+    const slots: UpcomingUploadSlot[] = [];
+
+    for (const mapping of activeMappings) {
+      const morningSlot = normalizeTimeValue(mapping.upload_time_morning, fallbackMorning);
+      const eveningSlot = normalizeTimeValue(mapping.upload_time_evening, fallbackEvening);
+      const mappingPending = pendingByMapping.get(mapping.id) || 0;
+      const slotDefinitions = [
+        { label: 'Morning', time: morningSlot },
+        { label: 'Evening', time: eveningSlot },
+      ];
+      const deduped = new Set<string>();
+
+      for (const slot of slotDefinitions) {
+        const dedupeKey = `${slot.label}:${slot.time}`;
+        if (deduped.has(dedupeKey)) {
+          continue;
+        }
+        deduped.add(dedupeKey);
+
+        const nextOccurrence = getNextOccurrence(slot.time, schedulerTimezone, now);
+        if (!nextOccurrence) {
+          continue;
+        }
+
+        slots.push({
+          id: `${mapping.id}:${slot.label}:${slot.time}`,
+          kind: 'mapping',
+          mappingId: mapping.id,
+          mappingName: mapping.name,
+          slotLabel: slot.label,
+          slotTime: slot.time,
+          scheduledAt: nextOccurrence.getTime(),
+          pendingCount: mappingPending,
+          nextVideoTitle: nextPendingTitleByMapping.get(mapping.id) || null,
+        });
+      }
+    }
+
+    const globalSlots = [
+      { label: 'Global Morning', time: fallbackMorning },
+      { label: 'Global Evening', time: fallbackEvening },
+    ];
+    const globalDeduped = new Set<string>();
+
+    for (const slot of globalSlots) {
+      if (globalDeduped.has(slot.time)) {
+        continue;
+      }
+      globalDeduped.add(slot.time);
+
+      const nextOccurrence = getNextOccurrence(slot.time, schedulerTimezone, now);
+      if (!nextOccurrence) {
+        continue;
+      }
+
+      slots.push({
+        id: `global:${slot.label}:${slot.time}`,
+        kind: 'global',
+        mappingId: null,
+        mappingName: 'Global Queue',
+        slotLabel: slot.label,
+        slotTime: slot.time,
+        scheduledAt: nextOccurrence.getTime(),
+        pendingCount: pendingGlobalQueue,
+        nextVideoTitle: nextGlobalPendingTitle,
+      });
+    }
+
+    return slots.sort((first, second) => first.scheduledAt - second.scheduledAt).slice(0, 8);
+  }, [
+    channelMappings,
+    currentMinuteKey,
+    config.upload_time_evening,
+    config.upload_time_morning,
+    pendingByMapping,
+    pendingGlobalQueue,
+    nextGlobalPendingTitle,
+    nextPendingTitleByMapping,
+    schedulerTimezone,
+  ]);
+
+  const delayedPublishQueue = useMemo(() => {
+    const queue: ScheduledPublishItem[] = [];
+
+    for (const short of shorts) {
+      if (short.status !== 'Uploaded' || !short.scheduled_date) {
+        continue;
+      }
+
+      const scheduledAt = new Date(short.scheduled_date).getTime();
+      if (!Number.isFinite(scheduledAt)) {
+        continue;
+      }
+
+      queue.push({
+        id: short.id,
+        title: short.title,
+        mappingName: short.mapping_id ? mappingNameById.get(short.mapping_id) || 'Mapped Video' : 'Global Video',
+        scheduledAt,
+      });
+    }
+
+    return queue.sort((first, second) => first.scheduledAt - second.scheduledAt).slice(0, 8);
+  }, [shorts, mappingNameById, currentMinuteKey]);
 
   const statusBadge = useCallback((status: string) => {
     const map: Record<string, { cls: string; icon: JSX.Element }> = {
@@ -1135,6 +1445,37 @@ export default function GRAVIX() {
     return value ? new Date(value).toLocaleString() : '—';
   }, []);
 
+  const formatSchedulerDateTime = useCallback(
+    (timestamp: number) => {
+      return new Intl.DateTimeFormat('en-US', {
+        timeZone: schedulerTimezone,
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      }).format(new Date(timestamp));
+    },
+    [schedulerTimezone]
+  );
+
+  const relativeFromNow = useCallback(
+    (timestamp: number) => {
+      const diffMs = timestamp - clockNow;
+      if (Math.abs(diffMs) < 30 * 1000) {
+        return 'now';
+      }
+
+      const totalMinutes = Math.round(Math.abs(diffMs) / (60 * 1000));
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      const value = `${hours > 0 ? `${hours}h ` : ''}${minutes}m`;
+
+      return diffMs > 0 ? `in ${value}` : `${value} ago`;
+    },
+    [clockNow]
+  );
+
   const logout = useCallback(async () => {
     if (loggingOut) {
       return;
@@ -1169,6 +1510,17 @@ export default function GRAVIX() {
             </div>
 
             <div className="flex items-center gap-2">
+              <div className="hidden items-center gap-2 rounded-lg border border-border/70 bg-muted/35 px-2.5 py-1.5 md:flex">
+                <Clock className="h-3.5 w-3.5 text-primary" />
+                <div className="leading-tight">
+                  <p className="font-mono text-[11px] font-semibold text-foreground">
+                    {schedulerClockLabel} <span className="text-muted-foreground">({schedulerTimezone})</span>
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {schedulerClockDateLabel} · Local {localClockLabel}
+                  </p>
+                </div>
+              </div>
               <Button
                 variant="outline"
                 size="sm"
@@ -1347,6 +1699,92 @@ export default function GRAVIX() {
                     </CardContent>
                   </Card>
                 ))}
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
+                <Card className="glass-panel">
+                  <CardHeader className="pb-3">
+                    <CardTitle className="font-heading text-base">Next Upload Timeline</CardTitle>
+                    <CardDescription className="text-xs">
+                      Mapping-wise + global slots in <span className="font-medium">{schedulerTimezone}</span>
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {upcomingUploadSlots.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-border/70 px-3 py-8 text-center text-muted-foreground">
+                        <Clock className="mx-auto mb-2 h-7 w-7 opacity-40" />
+                        <p className="text-sm">No upcoming slots found</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {upcomingUploadSlots.map((slot) => (
+                          <div
+                            key={slot.id}
+                            className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/25 px-3 py-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <p className="truncate text-sm font-medium">{slot.mappingName}</p>
+                                <Badge variant="outline" className="text-[10px]">
+                                  {slot.kind === 'global' ? 'Global' : 'Mapping'}
+                                </Badge>
+                              </div>
+                              <p className="text-[11px] text-muted-foreground">
+                                {slot.slotLabel} ({slot.slotTime}) · {formatSchedulerDateTime(slot.scheduledAt)}
+                              </p>
+                              {slot.nextVideoTitle ? (
+                                <p className="truncate text-[11px] text-muted-foreground/90">
+                                  Next video: {slot.nextVideoTitle}
+                                </p>
+                              ) : (
+                                <p className="text-[11px] text-muted-foreground/70">Next video: none in queue</p>
+                              )}
+                            </div>
+                            <div className="text-right">
+                              <p className="text-xs font-semibold text-primary">{relativeFromNow(slot.scheduledAt)}</p>
+                              <p className="text-[10px] text-muted-foreground">Pending: {slot.pendingCount}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="glass-panel">
+                  <CardHeader className="pb-3">
+                    <CardTitle className="font-heading text-base">Scheduled Public Publish</CardTitle>
+                    <CardDescription className="text-xs">
+                      Videos waiting for delayed auto-public transition
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {delayedPublishQueue.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-border/70 px-3 py-8 text-center text-muted-foreground">
+                        <Zap className="mx-auto mb-2 h-7 w-7 opacity-40" />
+                        <p className="text-sm">No delayed publish queue</p>
+                      </div>
+                    ) : (
+                      <ScrollArea className="h-56 pr-2">
+                        <div className="space-y-2">
+                          {delayedPublishQueue.map((item) => (
+                            <div
+                              key={item.id}
+                              className="rounded-lg border border-border/70 bg-muted/25 px-3 py-2"
+                            >
+                              <p className="truncate text-sm font-medium">{item.title}</p>
+                              <p className="truncate text-[11px] text-muted-foreground">{item.mappingName}</p>
+                              <div className="mt-1 flex items-center justify-between text-[11px]">
+                                <span className="text-muted-foreground">{formatSchedulerDateTime(item.scheduledAt)}</span>
+                                <span className="font-semibold text-primary">{relativeFromNow(item.scheduledAt)}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    )}
+                  </CardContent>
+                </Card>
               </div>
 
               <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">

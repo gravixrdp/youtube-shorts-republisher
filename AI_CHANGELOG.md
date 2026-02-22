@@ -23,6 +23,25 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 10:35 UTC — Codex
+- Added live top-header scheduler clock in admin panel:
+  - Shows current time with seconds for configured `scheduler_timezone`.
+  - Also displays date + local clock reference.
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Added dashboard section for next publish/upload visibility:
+  - New `Next Upload Timeline` card now lists upcoming slots for:
+    - per-mapping morning/evening timings
+    - global fallback timings
+  - Each row shows mapping/global label, exact slot time, relative countdown, pending count, and next queued video title.
+  - New `Scheduled Public Publish` card lists queued delayed publish items from `scheduled_date` with timing/countdown.
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+  - Admin dashboard now renders new cards and clock.
+
 ### 2026-02-22 10:19 UTC — Codex
 - Fixed admin login session issue on HTTP deployments:
   - Root cause: admin cookie was always set with `Secure`, so browsers on non-HTTPS URLs did not persist login session.
