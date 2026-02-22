@@ -6,6 +6,10 @@ interface EnhancementResult {
   hashtags: string[];
 }
 
+interface EnhancementOptions {
+  blockedTerms?: string[];
+}
+
 interface GeminiGenerateResult {
   text: string;
   model: string;
@@ -49,18 +53,77 @@ function normalizeHashtag(value: string): string {
   return `#${cleaned.toLowerCase()}`;
 }
 
-function sanitizeHashtags(values: string[], fallbackTags: string[] = []): string[] {
+function normalizeComparableToken(value: string): string {
+  return value
+    .replace(/^#+/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+function buildBlockedComparableSet(blockedTerms: string[]): Set<string> {
+  return new Set(
+    blockedTerms
+      .map((term) => normalizeComparableToken(term))
+      .filter((term) => term.length >= 3)
+  );
+}
+
+function isBlockedHashtagValue(value: string, blockedComparables: Set<string>): boolean {
+  if (blockedComparables.size === 0) {
+    return false;
+  }
+
+  const comparable = normalizeComparableToken(value);
+  if (!comparable) {
+    return false;
+  }
+
+  for (const blocked of blockedComparables) {
+    if (comparable === blocked || comparable.includes(blocked) || blocked.includes(comparable)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function stripBlockedHashtagsFromDescription(description: string, blockedTerms: string[]): string {
+  if (!description || blockedTerms.length === 0) {
+    return description;
+  }
+
+  const blockedComparables = buildBlockedComparableSet(blockedTerms);
+  if (blockedComparables.size === 0) {
+    return description;
+  }
+
+  return description
+    .replace(/#[a-zA-Z0-9_]+/g, (tag) => (isBlockedHashtagValue(tag, blockedComparables) ? '' : tag))
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function sanitizeHashtags(values: string[], fallbackTags: string[] = [], blockedTerms: string[] = []): string[] {
   const base = ['#shorts', '#ytshorts', '#viral', '#trending'];
   const merged = [...values, ...fallbackTags.map((tag) => `#${tag}`), ...base];
   const normalized = merged.map((tag) => normalizeHashtag(tag)).filter(Boolean);
-  return Array.from(new Set(normalized)).slice(0, 12);
+  const blockedComparables = buildBlockedComparableSet(blockedTerms);
+  return Array.from(new Set(normalized))
+    .filter((tag) => !isBlockedHashtagValue(tag, blockedComparables))
+    .slice(0, 12);
 }
 
-function fallbackEnhancement(originalTitle: string, originalDescription: string, tags: string[]): EnhancementResult {
+function fallbackEnhancement(
+  originalTitle: string,
+  originalDescription: string,
+  tags: string[],
+  blockedTerms: string[] = []
+): EnhancementResult {
   return {
     title: originalTitle,
-    description: originalDescription,
-    hashtags: sanitizeHashtags([], tags),
+    description: stripBlockedHashtagsFromDescription(originalDescription, blockedTerms),
+    hashtags: sanitizeHashtags([], tags, blockedTerms),
   };
 }
 
@@ -163,8 +226,14 @@ async function generateJsonWithRetry<T>(
 }
 
 // AI-enhanced title and description generation
-export async function enhanceContent(originalTitle: string, originalDescription: string, tags: string[] = []): Promise<EnhancementResult> {
+export async function enhanceContent(
+  originalTitle: string,
+  originalDescription: string,
+  tags: string[] = [],
+  options?: EnhancementOptions
+): Promise<EnhancementResult> {
   try {
+    const blockedTerms = options?.blockedTerms || [];
     const enhancementSchema: Record<string, unknown> = {
       type: 'OBJECT',
       properties: {
@@ -199,22 +268,32 @@ Rules:
 - description must be concise, under 220 chars, with a clear viewer hook.
 - hashtags must be 8 to 12, relevant + discoverable.
 - always include #shorts and #ytshorts.
+- never mention or tag source/original channel names or handles.
 - avoid fake claims, hate, sexual content, and policy-violating text.
 `;
 
-    const retryPrompt = `${prompt}
+    const blockedTermsPrompt =
+      blockedTerms.length > 0
+        ? `\nBlocked channel terms (never use in title, description, hashtags): ${blockedTerms.slice(0, 12).join(', ')}`
+        : '';
+
+    const promptWithRestrictions = `${prompt}${blockedTermsPrompt}`;
+
+    const retryPrompt = `${promptWithRestrictions}
 
 Return a compact single-line JSON object only. No markdown, no prose.`;
 
-    const parsed = await generateJsonWithRetry<Partial<EnhancementResult>>(prompt, retryPrompt, {
+    const parsed = await generateJsonWithRetry<Partial<EnhancementResult>>(promptWithRestrictions, retryPrompt, {
       temperature: 0.95,
       maxOutputTokens: 450,
       responseMimeType: 'application/json',
       responseSchema: enhancementSchema,
     });
     const title = compactWhitespace(parsed.title || originalTitle).slice(0, 60);
-    const description = compactWhitespace(parsed.description || originalDescription).slice(0, 220);
-    const hashtags = sanitizeHashtags(Array.isArray(parsed.hashtags) ? parsed.hashtags : [], tags);
+    const description = compactWhitespace(
+      stripBlockedHashtagsFromDescription(parsed.description || originalDescription, blockedTerms)
+    ).slice(0, 220);
+    const hashtags = sanitizeHashtags(Array.isArray(parsed.hashtags) ? parsed.hashtags : [], tags, blockedTerms);
 
     return {
       title: title || originalTitle,
@@ -223,7 +302,7 @@ Return a compact single-line JSON object only. No markdown, no prose.`;
     };
   } catch (error) {
     console.error('AI enhancement error:', error);
-    return fallbackEnhancement(originalTitle, originalDescription, tags);
+    return fallbackEnhancement(originalTitle, originalDescription, tags, options?.blockedTerms || []);
   }
 }
 

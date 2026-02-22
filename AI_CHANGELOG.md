@@ -23,6 +23,34 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 11:13 UTC — Codex
+- Fixed dashboard timeline preview so slots no longer repeat the same first title across morning/evening:
+  - Mapping timeline now computes queue order as scheduler uses it:
+    1) mapped pending (`mapping_id`)
+    2) unmapped pending from mapping source.
+  - Slot cards now show `Next video #N` (per-slot queue position), so evening slot shows next-in-line instead of repeating morning title.
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Added explicit per-mapping publish control button:
+  - New mapping-card button: `Stop Publish` / `Start Publish` (besides switch), with toast confirmation.
+  - Paused mapping does not run scheduled uploads for that mapping.
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Added source-channel anti-tag safety for AI + upload metadata:
+  - Blocks source channel terms/handles/IDs from generated hashtags and upload tags.
+  - Strips blocked source hashtags from description text before upload.
+  - Added AI prompt restriction to never mention/tag source/original channel terms.
+  - Files:
+    - `src/lib/ai-enhancement.ts`
+    - `src/app/api/scheduler/route.ts`
+    - `src/app/api/youtube/route.ts`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+  - Services restarted and active:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+
 ### 2026-02-22 10:50 UTC — Codex
 - Fixed mapping-vs-global queue routing so mapping slots no longer appear empty when source-matching pending videos are still unmapped:
   - Mapping run now resolves pending in this order:

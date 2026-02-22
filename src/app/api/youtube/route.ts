@@ -5,7 +5,8 @@ import {
   createLog,
   getConfig,
   getChannelMappingById,
-  cleanupUploadedShortsForSingleDestination
+  cleanupUploadedShortsForSingleDestination,
+  type ChannelMapping
 } from '@/lib/supabase/database';
 import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo, getVideoStatus } from '@/lib/youtube/uploader';
@@ -40,12 +41,96 @@ async function runUploadedCleanup() {
   });
 }
 
-function buildUploadTags(existingTags: string[] | null, hashtags: string[]): string[] {
+function normalizeComparableTag(value: string): string {
+  return value
+    .replace(/^#+/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+function extractHandleFromChannelUrl(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const match = value.match(/@([a-zA-Z0-9._-]+)/);
+  return match?.[1] || null;
+}
+
+function buildSourceTagBlockList(sourceChannel: string | null | undefined, mapping: ChannelMapping | null): string[] {
+  const values = [
+    sourceChannel?.trim(),
+    mapping?.source_channel_id?.trim(),
+    mapping?.source_channel_url?.trim(),
+    mapping?.source_channel_name?.trim() || null,
+    extractHandleFromChannelUrl(sourceChannel),
+    extractHandleFromChannelUrl(mapping?.source_channel_url),
+  ].filter((value): value is string => Boolean(value));
+
+  return Array.from(new Set(values));
+}
+
+function shouldFilterByBlockedTerms(value: string, blockedComparables: Set<string>): boolean {
+  if (blockedComparables.size === 0) {
+    return false;
+  }
+
+  const comparable = normalizeComparableTag(value);
+  if (!comparable) {
+    return false;
+  }
+
+  for (const blocked of blockedComparables) {
+    if (comparable === blocked || comparable.includes(blocked) || blocked.includes(comparable)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function filterBlockedTagValues(values: string[], blockedTerms: string[]): string[] {
+  if (values.length === 0 || blockedTerms.length === 0) {
+    return values;
+  }
+
+  const blockedComparables = new Set(
+    blockedTerms
+      .map((term) => normalizeComparableTag(term))
+      .filter((term) => term.length >= 3)
+  );
+
+  return values.filter((value) => !shouldFilterByBlockedTerms(value, blockedComparables));
+}
+
+function stripBlockedHashtagsFromDescription(description: string, blockedTerms: string[]): string {
+  if (!description || blockedTerms.length === 0) {
+    return description;
+  }
+
+  const blockedComparables = new Set(
+    blockedTerms
+      .map((term) => normalizeComparableTag(term))
+      .filter((term) => term.length >= 3)
+  );
+
+  if (blockedComparables.size === 0) {
+    return description;
+  }
+
+  return description
+    .replace(/#[a-zA-Z0-9_]+/g, (tag) => (shouldFilterByBlockedTerms(tag, blockedComparables) ? '' : tag))
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function buildUploadTags(existingTags: string[] | null, hashtags: string[], blockedTerms: string[]): string[] {
   const tags = [...(existingTags || []), ...hashtags]
     .map((value) => value.replace(/^#/, '').replace(/[^a-zA-Z0-9_]/g, '').trim())
     .filter(Boolean);
 
-  return Array.from(new Set(tags)).slice(0, 20);
+  return Array.from(new Set(filterBlockedTagValues(tags, blockedTerms))).slice(0, 20);
 }
 
 // POST - Download or Upload video
@@ -123,8 +208,9 @@ export async function POST(request: NextRequest) {
       const uploadBehavior = await resolveUploadBehavior(short.mapping_id);
       const visibility = uploadBehavior.visibility;
       const aiEnabled = uploadBehavior.aiEnabled;
+      const sourceTagBlockList = buildSourceTagBlockList(short.source_channel, uploadBehavior.mapping);
       let title = short.title;
-      let description = short.description || '';
+      let description = stripBlockedHashtagsFromDescription(short.description || '', sourceTagBlockList);
       let hashtags: string[] = [];
       
       if (aiEnabled) {
@@ -132,11 +218,14 @@ export async function POST(request: NextRequest) {
           const enhanced = await enhanceContent(
             short.title, 
             short.description || '', 
-            short.tags || []
+            short.tags || [],
+            {
+              blockedTerms: sourceTagBlockList,
+            }
           );
           title = enhanced.title;
-          description = enhanced.description;
-          hashtags = enhanced.hashtags;
+          description = stripBlockedHashtagsFromDescription(enhanced.description, sourceTagBlockList);
+          hashtags = filterBlockedTagValues(enhanced.hashtags, sourceTagBlockList);
           
           await updateShort(shortId, {
             ai_title: enhanced.title,
@@ -168,7 +257,7 @@ export async function POST(request: NextRequest) {
         filePath,
         title,
         description,
-        buildUploadTags(short.tags || [], hashtags),
+        buildUploadTags(short.tags || [], hashtags, sourceTagBlockList),
         visibility,
         {
           refreshToken: destinationAuth.refreshToken
@@ -249,18 +338,21 @@ export async function POST(request: NextRequest) {
       const uploadBehavior = await resolveUploadBehavior(short.mapping_id);
       const visibility = uploadBehavior.visibility;
       const aiEnabled = uploadBehavior.aiEnabled;
+      const sourceTagBlockList = buildSourceTagBlockList(short.source_channel, uploadBehavior.mapping);
       await updateShort(shortId, { status: 'Uploading' });
       
       let title = short.title;
-      let description = short.description || '';
+      let description = stripBlockedHashtagsFromDescription(short.description || '', sourceTagBlockList);
       let hashtags: string[] = [];
       
       if (aiEnabled) {
         try {
-          const enhanced = await enhanceContent(short.title, short.description || '', short.tags || []);
+          const enhanced = await enhanceContent(short.title, short.description || '', short.tags || [], {
+            blockedTerms: sourceTagBlockList,
+          });
           title = enhanced.title;
-          description = enhanced.description;
-          hashtags = enhanced.hashtags;
+          description = stripBlockedHashtagsFromDescription(enhanced.description, sourceTagBlockList);
+          hashtags = filterBlockedTagValues(enhanced.hashtags, sourceTagBlockList);
         } catch {
           // Use original content
         }
@@ -284,7 +376,7 @@ export async function POST(request: NextRequest) {
         downloadResult.filePath!,
         title,
         description,
-        buildUploadTags(short.tags || [], hashtags),
+        buildUploadTags(short.tags || [], hashtags, sourceTagBlockList),
         visibility,
         {
           refreshToken: destinationAuth.refreshToken

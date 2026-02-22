@@ -170,6 +170,7 @@ interface UpcomingUploadSlot {
   slotLabel: string;
   slotTime: string;
   scheduledAt: number;
+  queuePosition: number;
   pendingCount: number;
   nextVideoTitle: string | null;
 }
@@ -1073,10 +1074,17 @@ export default function GRAVIX() {
       });
       const data = await response.json();
       if (data.success) {
-        await fetchMappings();
+        await Promise.all([fetchMappings(), fetchStats()]);
+        toast({
+          title: isActive ? 'Publish Started' : 'Publish Stopped',
+          description: isActive
+            ? 'This mapping will publish on its configured slots.'
+            : 'This mapping is paused. No scheduled publish will run for it.',
+        });
       }
     } catch (error) {
       console.error('Failed to toggle mapping:', error);
+      toast({ title: 'Error', description: 'Failed to update mapping status', variant: 'destructive' });
     } finally {
       setActionState('toggleMapping', false);
       setActiveMappingId(null);
@@ -1273,22 +1281,17 @@ export default function GRAVIX() {
     return new Set(mappingIdsBySourceValue.keys());
   }, [mappingIdsBySourceValue]);
 
-  const mappingQueueSummaryById = useMemo(() => {
-    const summary = new Map<string, { pendingCount: number; nextVideoTitle: string | null }>();
-
-    for (const mapping of activeMappings) {
-      summary.set(mapping.id, { pendingCount: 0, nextVideoTitle: null });
-    }
+  const mappingQueueTitlesById = useMemo(() => {
+    const mappedTitlesById = new Map<string, string[]>();
+    const unmappedTitlesBySource = new Map<string, string[]>();
 
     for (const short of sortedPendingShorts) {
       if (short.mapping_id) {
-        const entry = summary.get(short.mapping_id);
-        if (!entry) {
-          continue;
-        }
-        entry.pendingCount += 1;
-        if (!entry.nextVideoTitle) {
-          entry.nextVideoTitle = short.title;
+        const existing = mappedTitlesById.get(short.mapping_id);
+        if (existing) {
+          existing.push(short.title);
+        } else {
+          mappedTitlesById.set(short.mapping_id, [short.title]);
         }
         continue;
       }
@@ -1298,28 +1301,37 @@ export default function GRAVIX() {
         continue;
       }
 
-      const mappingIds = mappingIdsBySourceValue.get(sourceValue);
-      if (!mappingIds || mappingIds.length === 0) {
-        continue;
-      }
-
-      for (const mappingId of mappingIds) {
-        const entry = summary.get(mappingId);
-        if (!entry) {
-          continue;
-        }
-        entry.pendingCount += 1;
-        if (!entry.nextVideoTitle) {
-          entry.nextVideoTitle = short.title;
-        }
+      const existing = unmappedTitlesBySource.get(sourceValue);
+      if (existing) {
+        existing.push(short.title);
+      } else {
+        unmappedTitlesBySource.set(sourceValue, [short.title]);
       }
     }
 
-    return summary;
-  }, [activeMappings, mappingIdsBySourceValue, sortedPendingShorts]);
+    const queueTitlesById = new Map<string, string[]>();
 
-  const globalQueueSummary = useMemo(() => {
-    const summary = { pendingCount: 0, nextVideoTitle: null as string | null };
+    for (const mapping of activeMappings) {
+      const titles = [...(mappedTitlesById.get(mapping.id) || [])];
+      const mappingSourceValues = Array.from(
+        new Set([mapping.source_channel_id?.trim(), mapping.source_channel_url?.trim()].filter((value): value is string => Boolean(value)))
+      );
+
+      for (const sourceValue of mappingSourceValues) {
+        const sourceTitles = unmappedTitlesBySource.get(sourceValue);
+        if (sourceTitles && sourceTitles.length > 0) {
+          titles.push(...sourceTitles);
+        }
+      }
+
+      queueTitlesById.set(mapping.id, titles);
+    }
+
+    return queueTitlesById;
+  }, [activeMappings, sortedPendingShorts]);
+
+  const globalQueueTitles = useMemo(() => {
+    const titles: string[] = [];
 
     for (const short of sortedPendingShorts) {
       if (short.mapping_id) {
@@ -1331,13 +1343,10 @@ export default function GRAVIX() {
         continue;
       }
 
-      summary.pendingCount += 1;
-      if (!summary.nextVideoTitle) {
-        summary.nextVideoTitle = short.title;
-      }
+      titles.push(short.title);
     }
 
-    return summary;
+    return titles;
   }, [activeMappingSourceValues, sortedPendingShorts]);
 
   const destinationMappingCount = useMemo(() => {
@@ -1370,25 +1379,35 @@ export default function GRAVIX() {
     for (const mapping of activeMappings) {
       const morningSlot = normalizeTimeValue(mapping.upload_time_morning, fallbackMorning);
       const eveningSlot = normalizeTimeValue(mapping.upload_time_evening, fallbackEvening);
-      const mappingQueue = mappingQueueSummaryById.get(mapping.id) || { pendingCount: 0, nextVideoTitle: null };
+      const queueTitles = mappingQueueTitlesById.get(mapping.id) || [];
       const slotDefinitions = [
         { label: 'Morning', time: morningSlot },
         { label: 'Evening', time: eveningSlot },
       ];
-      const deduped = new Set<string>();
+      const dedupedTimes = new Set<string>();
+      const mappingSlots: Array<{ label: string; time: string; scheduledAt: number }> = [];
 
       for (const slot of slotDefinitions) {
-        const dedupeKey = `${slot.label}:${slot.time}`;
-        if (deduped.has(dedupeKey)) {
+        if (dedupedTimes.has(slot.time)) {
           continue;
         }
-        deduped.add(dedupeKey);
+        dedupedTimes.add(slot.time);
 
         const nextOccurrence = getNextOccurrence(slot.time, schedulerTimezone, now);
         if (!nextOccurrence) {
           continue;
         }
 
+        mappingSlots.push({
+          label: slot.label,
+          time: slot.time,
+          scheduledAt: nextOccurrence.getTime(),
+        });
+      }
+
+      mappingSlots
+        .sort((first, second) => first.scheduledAt - second.scheduledAt)
+        .forEach((slot, index) => {
         slots.push({
           id: `${mapping.id}:${slot.label}:${slot.time}`,
           kind: 'mapping',
@@ -1396,30 +1415,42 @@ export default function GRAVIX() {
           mappingName: mapping.name,
           slotLabel: slot.label,
           slotTime: slot.time,
-          scheduledAt: nextOccurrence.getTime(),
-          pendingCount: mappingQueue.pendingCount,
-          nextVideoTitle: mappingQueue.nextVideoTitle,
+          scheduledAt: slot.scheduledAt,
+          queuePosition: index + 1,
+          pendingCount: queueTitles.length,
+          nextVideoTitle: queueTitles[index] || null,
         });
-      }
+      });
     }
 
-    const globalSlots = [
+    const globalSlotDefinitions = [
       { label: 'Global Morning', time: fallbackMorning },
       { label: 'Global Evening', time: fallbackEvening },
     ];
-    const globalDeduped = new Set<string>();
+    const globalDedupedTimes = new Set<string>();
+    const globalCandidates: Array<{ label: string; time: string; scheduledAt: number }> = [];
 
-    for (const slot of globalSlots) {
-      if (globalDeduped.has(slot.time)) {
+    for (const slot of globalSlotDefinitions) {
+      if (globalDedupedTimes.has(slot.time)) {
         continue;
       }
-      globalDeduped.add(slot.time);
+      globalDedupedTimes.add(slot.time);
 
       const nextOccurrence = getNextOccurrence(slot.time, schedulerTimezone, now);
       if (!nextOccurrence) {
         continue;
       }
 
+      globalCandidates.push({
+        label: slot.label,
+        time: slot.time,
+        scheduledAt: nextOccurrence.getTime(),
+      });
+    }
+
+    globalCandidates
+      .sort((first, second) => first.scheduledAt - second.scheduledAt)
+      .forEach((slot, index) => {
       slots.push({
         id: `global:${slot.label}:${slot.time}`,
         kind: 'global',
@@ -1427,11 +1458,12 @@ export default function GRAVIX() {
         mappingName: 'Global Queue',
         slotLabel: slot.label,
         slotTime: slot.time,
-        scheduledAt: nextOccurrence.getTime(),
-        pendingCount: globalQueueSummary.pendingCount,
-        nextVideoTitle: globalQueueSummary.nextVideoTitle,
+        scheduledAt: slot.scheduledAt,
+        queuePosition: index + 1,
+        pendingCount: globalQueueTitles.length,
+        nextVideoTitle: globalQueueTitles[index] || null,
       });
-    }
+    });
 
     return slots.sort((first, second) => first.scheduledAt - second.scheduledAt).slice(0, 8);
   }, [
@@ -1439,8 +1471,8 @@ export default function GRAVIX() {
     currentMinuteKey,
     config.upload_time_evening,
     config.upload_time_morning,
-    globalQueueSummary,
-    mappingQueueSummaryById,
+    globalQueueTitles,
+    mappingQueueTitlesById,
     schedulerTimezone,
   ]);
 
@@ -1794,7 +1826,7 @@ export default function GRAVIX() {
                               </p>
                               {slot.nextVideoTitle ? (
                                 <p className="truncate text-[11px] text-muted-foreground/90">
-                                  Next video: {slot.nextVideoTitle}
+                                  Next video #{slot.queuePosition}: {slot.nextVideoTitle}
                                 </p>
                               ) : (
                                 <p className="text-[11px] text-muted-foreground/70">Next video: none in queue</p>
@@ -2436,6 +2468,24 @@ export default function GRAVIX() {
                               <Download className="mr-1 h-3.5 w-3.5" />
                             )}
                             Fetch
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant={mapping.is_active ? 'secondary' : 'outline'}
+                            className="flex-1"
+                            onClick={() => {
+                              void toggleMapping(mapping.id, !mapping.is_active);
+                            }}
+                            disabled={isBusy}
+                          >
+                            {actionLoad.toggleMapping && activeMappingId === mapping.id ? (
+                              <RefreshCw className="mr-1 h-3.5 w-3.5 animate-spin" />
+                            ) : mapping.is_active ? (
+                              <XCircle className="mr-1 h-3.5 w-3.5" />
+                            ) : (
+                              <Play className="mr-1 h-3.5 w-3.5" />
+                            )}
+                            {mapping.is_active ? 'Stop Publish' : 'Start Publish'}
                           </Button>
                           <Badge variant="outline" className="text-[10px]">
                             {mapping.uploads_per_day}/day
