@@ -216,6 +216,168 @@ interface DeleteMappingOptions {
   removeMappedShorts?: boolean;
 }
 
+function chunkValues<T>(values: T[], chunkSize: number = 200): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+async function deleteLogsByShortIds(shortIds: string[]): Promise<boolean> {
+  const normalized = Array.from(new Set(shortIds.map((id) => id?.trim()).filter(Boolean) as string[]));
+  if (normalized.length === 0) {
+    return true;
+  }
+
+  for (const batch of chunkValues(normalized, 200)) {
+    const { error } = await supabaseAdmin
+      .from('upload_logs')
+      .delete()
+      .in('short_id', batch);
+
+    if (error) {
+      console.error('Error deleting upload logs by short IDs:', error);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function normalizeSearchTokens(values: Array<string | null | undefined>): string[] {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value?.trim().toLowerCase())
+        .filter((value): value is string => Boolean(value && value.length >= 3))
+    )
+  );
+}
+
+async function deleteLooseLogsBySearchValues(values: Array<string | null | undefined>): Promise<boolean> {
+  const tokens = normalizeSearchTokens(values);
+  if (tokens.length === 0) {
+    return true;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('upload_logs')
+    .select('id, message, details')
+    .is('short_id', null)
+    .limit(20000);
+
+  if (error) {
+    console.error('Error reading loose logs for cleanup:', error);
+    return false;
+  }
+
+  const matchedLogIds = (data || [])
+    .filter((log) => {
+      const haystack = `${log.message || ''} ${log.details || ''}`.toLowerCase();
+      return tokens.some((token) => haystack.includes(token));
+    })
+    .map((log) => log.id as string)
+    .filter(Boolean);
+
+  if (matchedLogIds.length === 0) {
+    return true;
+  }
+
+  for (const batch of chunkValues(matchedLogIds, 200)) {
+    const { error: deleteError } = await supabaseAdmin
+      .from('upload_logs')
+      .delete()
+      .in('id', batch);
+
+    if (deleteError) {
+      console.error('Error deleting loose logs by search tokens:', deleteError);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function deleteShortsAndLogsBySourceValues(values: Array<string | null | undefined>): Promise<boolean> {
+  const sourceValues = Array.from(
+    new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))
+  );
+
+  if (sourceValues.length === 0) {
+    return true;
+  }
+
+  const { data: sourceShorts, error: readError } = await supabaseAdmin
+    .from('shorts_data')
+    .select('id')
+    .in('source_channel', sourceValues);
+
+  if (readError) {
+    console.error('Error reading source shorts before cleanup:', readError);
+    return false;
+  }
+
+  const shortIds = (sourceShorts || [])
+    .map((row) => row.id as string)
+    .filter(Boolean);
+
+  const logsDeleted = await deleteLogsByShortIds(shortIds);
+  if (!logsDeleted) {
+    return false;
+  }
+
+  const { error: deleteError } = await supabaseAdmin
+    .from('shorts_data')
+    .delete()
+    .in('source_channel', sourceValues);
+
+  if (deleteError) {
+    console.error('Error deleting source shorts during cleanup:', deleteError);
+    return false;
+  }
+
+  return true;
+}
+
+async function deleteShortsAndLogsByTargetChannel(targetChannelId: string): Promise<boolean> {
+  const normalizedTarget = targetChannelId?.trim();
+  if (!normalizedTarget) {
+    return true;
+  }
+
+  const { data: targetShorts, error: readError } = await supabaseAdmin
+    .from('shorts_data')
+    .select('id')
+    .eq('target_channel', normalizedTarget);
+
+  if (readError) {
+    console.error('Error reading destination shorts before cleanup:', readError);
+    return false;
+  }
+
+  const shortIds = (targetShorts || [])
+    .map((row) => row.id as string)
+    .filter(Boolean);
+
+  const logsDeleted = await deleteLogsByShortIds(shortIds);
+  if (!logsDeleted) {
+    return false;
+  }
+
+  const { error: deleteError } = await supabaseAdmin
+    .from('shorts_data')
+    .delete()
+    .eq('target_channel', normalizedTarget);
+
+  if (deleteError) {
+    console.error('Error deleting destination shorts during cleanup:', deleteError);
+    return false;
+  }
+
+  return true;
+}
+
 async function deleteShortsByMappingId(mappingId: string): Promise<boolean> {
   const { data: mappedShorts, error: readError } = await supabaseAdmin
     .from('shorts_data')
@@ -259,6 +421,7 @@ async function deleteShortsByMappingId(mappingId: string): Promise<boolean> {
 
 export async function deleteChannelMapping(id: string, options?: DeleteMappingOptions): Promise<boolean> {
   const removeMappedShorts = options?.removeMappedShorts ?? true;
+  const mapping = await getChannelMappingById(id);
 
   if (removeMappedShorts) {
     const removed = await deleteShortsByMappingId(id);
@@ -282,6 +445,12 @@ export async function deleteChannelMapping(id: string, options?: DeleteMappingOp
     console.error(`Warning: failed to delete publish delay override for mapping ${id}`);
   }
 
+  const looseLogsDeleted = await deleteLooseLogsBySearchValues([mapping?.id || id]);
+  if (!looseLogsDeleted) {
+    console.error(`Error deleting loose logs for mapping ${id}`);
+    return false;
+  }
+
   return true;
 }
 
@@ -301,6 +470,16 @@ export async function deleteMappingsByTargetChannelId(targetChannelId: string): 
     if (!success) {
       return false;
     }
+  }
+
+  const destinationCleanup = await deleteShortsAndLogsByTargetChannel(targetChannelId);
+  if (!destinationCleanup) {
+    return false;
+  }
+
+  const looseLogsDeleted = await deleteLooseLogsBySearchValues([targetChannelId]);
+  if (!looseLogsDeleted) {
+    return false;
   }
 
   return true;
@@ -350,6 +529,16 @@ export async function deleteMappingsBySourceChannel(sourceChannelId: string, sou
     if (!success) {
       return false;
     }
+  }
+
+  const sourceCleanup = await deleteShortsAndLogsBySourceValues([sourceChannelId, sourceChannelUrl]);
+  if (!sourceCleanup) {
+    return false;
+  }
+
+  const looseLogsDeleted = await deleteLooseLogsBySearchValues([sourceChannelId, sourceChannelUrl]);
+  if (!looseLogsDeleted) {
+    return false;
   }
 
   return true;
@@ -651,7 +840,7 @@ export async function linkUnmappedSourceShortsToMapping(
       target_channel: targetChannelId,
       updated_at: now,
     })
-    .eq('mapping_id', null)
+    .is('mapping_id', null)
     .eq('source_channel', sourceChannelId)
     .select('id');
 
@@ -669,7 +858,7 @@ export async function linkUnmappedSourceShortsToMapping(
         target_channel: targetChannelId,
         updated_at: now,
       })
-      .eq('mapping_id', null)
+      .is('mapping_id', null)
       .eq('source_channel', sourceChannelUrl)
       .select('id');
 

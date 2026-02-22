@@ -57,14 +57,12 @@ export function parseDuration(duration: string): number {
 
 // Check if video is a Short (≤ 60 seconds and vertical)
 export function isShort(duration: number, title: string, description: string): boolean {
-  // Duration must be ≤ 60 seconds
-  if (duration > 60 || duration === 0) return false;
-  
-  // Check for #shorts in title or description
-  const shortKeywords = ['#shorts', '#short', '#ytshorts', 'shorts'];
-  const textToCheck = `${title} ${description}`.toLowerCase();
-  
-  return shortKeywords.some(keyword => textToCheck.includes(keyword));
+  void title;
+  void description;
+
+  // Shorts can be up to 3 minutes; rely on duration to avoid missing videos without #shorts tags.
+  if (duration <= 0) return false;
+  return duration <= 180;
 }
 
 // Extract channel ID from URL

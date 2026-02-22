@@ -23,6 +23,36 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 12:59 UTC — Codex
+- Fixed scraping not pulling Shorts for channels where title/description didn’t include `#shorts`:
+  - Shorts classification now relies on duration (`<= 180s`) instead of hashtag keyword presence.
+  - This restores scraping for valid Shorts channels that don’t include shorts keywords in metadata.
+  - File:
+    - `src/lib/youtube/scraper.ts`
+- Improved scrape API feedback for zero-result runs:
+  - `fetch-source`, `fetch-all-sources`, `fetch`, and `fetch-all` now return explicit message when one/more sources return `0` shorts.
+  - File:
+    - `src/app/api/videos/route.ts`
+- Fixed mapping link bug causing DB errors during mapping creation/linking:
+  - Replaced invalid null filter `.eq('mapping_id', null)` with `.is('mapping_id', null)` in source-short linking.
+  - File:
+    - `src/lib/supabase/database.ts`
+- Added hard cleanup for delete flows (data + logs):
+  - Added cleanup helpers to remove shorts + upload logs by source/target scope.
+  - Deleting a destination now also purges destination-scoped shorts/logs after mapping cleanup.
+  - Deleting a source now also purges source-scoped shorts/logs after mapping cleanup.
+  - Deleting a mapping now also purges loose mapping-related logs (`short_id IS NULL`) by mapping token.
+  - File:
+    - `src/lib/supabase/database.ts`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+  - Services restarted and active:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+  - Live scrape check:
+    - `POST /api/videos` action `fetch-source` for `@ModoxRecap` returned `total=96, added=96`.
+
 ### 2026-02-22 12:46 UTC — Codex
 - Added per-mapping delayed public publish override in Mapping section:
   - New mapping field `Auto Publish Delay` with options:

@@ -154,9 +154,14 @@ export async function POST(request: NextRequest) {
         errors,
       });
 
+      const message =
+        result.shorts.length === 0
+          ? 'No shorts found for this source. Verify channel has public shorts and correct URL.'
+          : 'Scraping completed. Source shorts metadata synced to database.';
+
       return NextResponse.json({
         success: true,
-        message: 'Scraping completed. Source shorts metadata synced to database.',
+        message,
         stats: { total: result.shorts.length, added, duplicates, errors },
       });
     }
@@ -169,6 +174,7 @@ export async function POST(request: NextRequest) {
       let totalDuplicates = 0;
       let totalErrors = 0;
       let totalFetched = 0;
+      let sourcesWithNoShorts = 0;
 
       for (const source of sources) {
         const result = await fetchShortsFromChannel(source.channel_url, 500);
@@ -185,6 +191,10 @@ export async function POST(request: NextRequest) {
         let sourceDuplicates = 0;
         let sourceErrors = 0;
         totalFetched += result.shorts.length;
+
+        if (result.shorts.length === 0) {
+          sourcesWithNoShorts++;
+        }
 
         for (const short of result.shorts) {
           const outcome = await persistShort({
@@ -224,9 +234,14 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      const noShortsSuffix =
+        sourcesWithNoShorts > 0
+          ? ` (${sourcesWithNoShorts} source${sourcesWithNoShorts > 1 ? 's' : ''} returned 0 shorts)`
+          : '';
+
       return NextResponse.json({
         success: true,
-        message: 'Scraping completed for all active source channels.',
+        message: `Scraping completed for all active source channels.${noShortsSuffix}`,
         stats: {
           sources: sources.length,
           total: totalFetched,
@@ -327,10 +342,15 @@ export async function POST(request: NextRequest) {
         duplicates,
         errors,
       });
+
+      const message =
+        result.shorts.length === 0
+          ? 'No shorts found for this mapped source. Verify channel has public shorts and correct URL.'
+          : 'Scraping completed. Source shorts metadata synced to database.';
       
       return NextResponse.json({
         success: true,
-        message: 'Scraping completed. Source shorts metadata synced to database.',
+        message,
         stats: { total: result.shorts.length, added, duplicates, errors }
       });
     }
@@ -354,6 +374,7 @@ export async function POST(request: NextRequest) {
       let totalAdded = 0;
       let totalDuplicates = 0;
       let totalErrors = 0;
+      let mappingsWithNoShorts = 0;
       
       for (const mapping of activeMappings) {
         const result = await fetchShortsFromChannel(mapping.source_channel_url, 500);
@@ -370,6 +391,10 @@ export async function POST(request: NextRequest) {
         let mappingAdded = 0;
         let mappingDuplicates = 0;
         let mappingErrors = 0;
+
+        if (result.shorts.length === 0) {
+          mappingsWithNoShorts++;
+        }
         
         for (const short of result.shorts) {
           const existing = await getShortByVideoId(short.videoId);
@@ -418,10 +443,15 @@ export async function POST(request: NextRequest) {
           errors: mappingErrors,
         });
       }
+
+      const noShortsSuffix =
+        mappingsWithNoShorts > 0
+          ? ` (${mappingsWithNoShorts} mapping${mappingsWithNoShorts > 1 ? 's' : ''} returned 0 shorts)`
+          : '';
       
       return NextResponse.json({
         success: true,
-        message: 'Scraping completed for all active source mappings.',
+        message: `Scraping completed for all active source mappings.${noShortsSuffix}`,
         stats: { channels: activeMappings.length, total: totalAdded + totalDuplicates + totalErrors, added: totalAdded, duplicates: totalDuplicates, errors: totalErrors }
       });
     }
