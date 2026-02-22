@@ -101,6 +101,7 @@ interface ChannelMapping {
   uploads_per_day: number;
   upload_time_morning: string | null;
   upload_time_evening: string | null;
+  publish_delay_hours: number | null;
   default_visibility: string;
   ai_enhancement_enabled: boolean;
   last_fetched_at: string | null;
@@ -217,6 +218,7 @@ const DEFAULT_MAPPING_FORM = {
   uploads_per_day: 2,
   upload_time_morning: '09:00',
   upload_time_evening: '18:00',
+  publish_delay_hours: '__global__',
   default_visibility: 'public',
   ai_enhancement_enabled: false,
 };
@@ -1182,6 +1184,10 @@ export default function GRAVIX() {
         uploads_per_day: mapping.uploads_per_day,
         upload_time_morning: mapping.upload_time_morning || '09:00',
         upload_time_evening: mapping.upload_time_evening || '18:00',
+        publish_delay_hours:
+          mapping.publish_delay_hours === null || mapping.publish_delay_hours === undefined
+            ? '__global__'
+            : String(mapping.publish_delay_hours),
         default_visibility: mapping.default_visibility,
         ai_enhancement_enabled: mapping.ai_enhancement_enabled,
       });
@@ -1272,6 +1278,13 @@ export default function GRAVIX() {
   const dashboardMappings = useMemo(() => channelMappings.slice(0, 5), [channelMappings]);
   const pendingShort = useMemo(() => shorts.find((short) => short.status === 'Pending')?.id || '', [shorts]);
   const schedulerTimezone = useMemo(() => (config.scheduler_timezone || 'UTC').trim() || 'UTC', [config.scheduler_timezone]);
+  const globalPublishDelayHours = useMemo(() => {
+    const parsed = Number.parseInt(config.unlisted_publish_delay_hours || '0', 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return 0;
+    }
+    return Math.min(72, Math.floor(parsed));
+  }, [config.unlisted_publish_delay_hours]);
   const currentMinuteKey = useMemo(() => Math.floor(clockNow / 60000), [clockNow]);
 
   const schedulerClockLabel = useMemo(() => {
@@ -2440,6 +2453,10 @@ export default function GRAVIX() {
                       sourceChannelById.get(mapping.source_channel_id) ||
                       sourceChannelByUrl.get(mapping.source_channel_url);
                     const scrapingStopped = sourceMeta ? !sourceMeta.is_active : false;
+                    const mappingDelayLabel =
+                      mapping.publish_delay_hours === null || mapping.publish_delay_hours === undefined
+                        ? `Delay: Global (${globalPublishDelayHours}h)`
+                        : `Delay: ${mapping.publish_delay_hours}h`;
 
                     return (
                       <Card key={mapping.id} className={`card-interactive glass-panel ${!mapping.is_active ? 'opacity-65' : ''}`}>
@@ -2548,6 +2565,9 @@ export default function GRAVIX() {
                           </Badge>
                           <Badge variant="outline" className="text-[10px]">
                             {mapping.upload_time_morning || '09:00'} / {mapping.upload_time_evening || '18:00'}
+                          </Badge>
+                          <Badge variant="outline" className="text-[10px]">
+                            {mappingDelayLabel}
                           </Badge>
                         </CardFooter>
                       </Card>
@@ -3344,6 +3364,32 @@ export default function GRAVIX() {
               </div>
 
               <div>
+                <Label className="text-xs">Auto Publish Delay</Label>
+                <Select
+                  value={newMapping.publish_delay_hours}
+                  onValueChange={(value) =>
+                    setNewMapping({
+                      ...newMapping,
+                      publish_delay_hours: value,
+                    })
+                  }
+                >
+                  <SelectTrigger className="mt-1.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__global__">Use Global ({globalPublishDelayHours}h)</SelectItem>
+                    <SelectItem value="0">No Delay (0h)</SelectItem>
+                    {[1, 2, 3, 4, 6, 8, 12, 24, 48, 72].map((value) => (
+                      <SelectItem key={value} value={value.toString()}>
+                        {value}h
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
                 <Label className="text-xs">Visibility</Label>
                 <Select
                   value={newMapping.default_visibility}
@@ -3361,7 +3407,8 @@ export default function GRAVIX() {
               </div>
             </div>
             <p className="text-[10px] text-muted-foreground">
-              These mapping slots run in the Scheduler Timezone set under Configuration.
+              These mapping slots run in the Scheduler Timezone set under Configuration. Auto publish delay applies to
+              unlisted/private uploads only.
             </p>
 
             <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/25 px-3 py-3">

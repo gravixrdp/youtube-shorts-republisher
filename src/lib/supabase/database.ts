@@ -1,6 +1,8 @@
 import { supabaseAdmin } from './client';
 import type { ShortsData, Config, UploadLog, SchedulerState } from './client';
 
+const MAPPING_PUBLISH_DELAY_CONFIG_PREFIX = 'mapping_publish_delay_hours:';
+
 // ==================== CONFIG OPERATIONS ====================
 
 export async function getConfig(key: string): Promise<string | null> {
@@ -18,6 +20,15 @@ export async function setConfig(key: string, value: string): Promise<boolean> {
   const { error } = await supabaseAdmin
     .from('config')
     .upsert({ key, value }, { onConflict: 'key' });
+
+  return !error;
+}
+
+export async function deleteConfig(key: string): Promise<boolean> {
+  const { error } = await supabaseAdmin
+    .from('config')
+    .delete()
+    .eq('key', key);
 
   return !error;
 }
@@ -61,11 +72,86 @@ export interface ChannelMapping {
   upload_time_evening: string | null;
   default_visibility: string | null;
   ai_enhancement_enabled: boolean;
+  publish_delay_hours?: number | null;
   last_fetched_at: string | null;
   total_fetched: number;
   total_uploaded: number;
   created_at: string;
   updated_at: string;
+}
+
+function mappingPublishDelayConfigKey(mappingId: string): string {
+  return `${MAPPING_PUBLISH_DELAY_CONFIG_PREFIX}${mappingId}`;
+}
+
+function parsePublishDelayHours(raw: string | null): number | null {
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return Math.min(72, Math.floor(parsed));
+}
+
+export async function getMappingPublishDelayHours(mappingId: string): Promise<number | null> {
+  if (!mappingId?.trim()) {
+    return null;
+  }
+
+  const raw = await getConfig(mappingPublishDelayConfigKey(mappingId));
+  return parsePublishDelayHours(raw);
+}
+
+export async function getMappingPublishDelayHoursMap(mappingIds: string[]): Promise<Map<string, number | null>> {
+  const normalizedIds = Array.from(new Set(mappingIds.map((id) => id?.trim()).filter(Boolean) as string[]));
+  const result = new Map<string, number | null>(normalizedIds.map((id) => [id, null]));
+
+  if (normalizedIds.length === 0) {
+    return result;
+  }
+
+  const keys = normalizedIds.map((id) => mappingPublishDelayConfigKey(id));
+  const { data, error } = await supabaseAdmin
+    .from('config')
+    .select('key, value')
+    .in('key', keys);
+
+  if (error || !data) {
+    return result;
+  }
+
+  for (const row of data) {
+    const key = (row.key as string | undefined) || '';
+    if (!key.startsWith(MAPPING_PUBLISH_DELAY_CONFIG_PREFIX)) {
+      continue;
+    }
+
+    const mappingId = key.slice(MAPPING_PUBLISH_DELAY_CONFIG_PREFIX.length);
+    if (!mappingId) {
+      continue;
+    }
+
+    result.set(mappingId, parsePublishDelayHours((row.value as string | null | undefined) ?? null));
+  }
+
+  return result;
+}
+
+export async function setMappingPublishDelayHours(mappingId: string, delayHours: number | null): Promise<boolean> {
+  if (!mappingId?.trim()) {
+    return false;
+  }
+
+  if (delayHours === null || delayHours === undefined) {
+    return deleteConfig(mappingPublishDelayConfigKey(mappingId));
+  }
+
+  const normalized = Math.min(72, Math.max(0, Math.floor(delayHours)));
+  return setConfig(mappingPublishDelayConfigKey(mappingId), String(normalized));
 }
 
 export async function getChannelMappings(): Promise<ChannelMapping[]> {
@@ -189,6 +275,11 @@ export async function deleteChannelMapping(id: string, options?: DeleteMappingOp
   if (error) {
     console.error('Error deleting channel mapping:', error);
     return false;
+  }
+
+  const delayDeleted = await deleteConfig(mappingPublishDelayConfigKey(id));
+  if (!delayDeleted) {
+    console.error(`Warning: failed to delete publish delay override for mapping ${id}`);
   }
 
   return true;

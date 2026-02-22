@@ -23,6 +23,38 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 12:46 UTC — Codex
+- Added per-mapping delayed public publish override in Mapping section:
+  - New mapping field `Auto Publish Delay` with options:
+    - `Use Global`
+    - `No Delay (0h)`
+    - custom hour values (1h..72h)
+  - Mapping cards now show effective delay badge (global/custom).
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Added backend persistence for mapping-specific delay override (without schema migration):
+  - Delay override stored in `config` table using key prefix:
+    - `mapping_publish_delay_hours:<mappingId>`
+  - Added helpers to read/write/delete mapping delay overrides.
+  - Delay override is cleaned up automatically when mapping is deleted.
+  - File:
+    - `src/lib/supabase/database.ts`
+- Added API support for mapping delay override:
+  - `/api/mappings` GET now hydrates `publish_delay_hours` on each mapping.
+  - `/api/mappings` POST/PUT now saves `publish_delay_hours`.
+  - File:
+    - `src/app/api/mappings/route.ts`
+- Upload behavior now respects mapping override first, then global fallback:
+  - `resolveUploadBehavior(mappingId)` uses mapping-specific delay when set.
+  - File:
+    - `src/lib/youtube/upload-settings.ts`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+  - Services restarted and active:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+
 ### 2026-02-22 12:26 UTC — Codex
 - Fixed Video Library live update behavior:
   - Added tab-aware polling for fresh `shorts` + `stats` data when the page is visible.

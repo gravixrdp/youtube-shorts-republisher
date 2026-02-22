@@ -1,4 +1,9 @@
-import { getChannelMappingById, getConfig, type ChannelMapping } from '@/lib/supabase/database';
+import {
+  getChannelMappingById,
+  getConfig,
+  getMappingPublishDelayHours,
+  type ChannelMapping,
+} from '@/lib/supabase/database';
 
 export interface UploadBehavior {
   mapping: ChannelMapping | null;
@@ -27,17 +32,19 @@ function parseDelayHours(raw: string | null): number {
 }
 
 export async function resolveUploadBehavior(mappingId: string | null): Promise<UploadBehavior> {
-  const [mapping, globalVisibilityRaw, globalAiRaw, delayRaw] = await Promise.all([
+  const [mapping, globalVisibilityRaw, globalAiRaw, delayRaw, mappingDelayOverride] = await Promise.all([
     mappingId ? getChannelMappingById(mappingId) : Promise.resolve(null),
     getConfig('default_visibility'),
     getConfig('ai_enhancement_enabled'),
     getConfig('unlisted_publish_delay_hours'),
+    mappingId ? getMappingPublishDelayHours(mappingId) : Promise.resolve(null),
   ]);
 
   const globalVisibility = normalizeVisibility(globalVisibilityRaw);
   const mappingVisibility = normalizeVisibility(mapping?.default_visibility || globalVisibility);
   const aiEnabled = mapping ? Boolean(mapping.ai_enhancement_enabled) : globalAiRaw === 'true';
-  const delayHours = parseDelayHours(delayRaw);
+  const globalDelayHours = parseDelayHours(delayRaw);
+  const delayHours = mappingDelayOverride === null ? globalDelayHours : mappingDelayOverride;
   const shouldSchedulePublish =
     delayHours > 0 && (mappingVisibility === 'unlisted' || mappingVisibility === 'private');
 

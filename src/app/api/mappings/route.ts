@@ -6,7 +6,9 @@ import {
   createChannelMapping, 
   updateChannelMapping, 
   deleteChannelMapping,
-  linkUnmappedSourceShortsToMapping
+  linkUnmappedSourceShortsToMapping,
+  getMappingPublishDelayHoursMap,
+  setMappingPublishDelayHours
 } from '@/lib/supabase/database';
 
 function normalizeTime(value: unknown, fallback: string): string {
@@ -30,6 +32,26 @@ function normalizeUploadsPerDay(value: unknown, fallback: number): number {
   return Math.min(24, Math.max(1, Math.floor(numeric)));
 }
 
+function normalizePublishDelayHours(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed || trimmed === 'global' || trimmed === '__global__') {
+      return null;
+    }
+  }
+
+  const numeric = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return null;
+  }
+
+  return Math.min(72, Math.max(0, Math.floor(numeric)));
+}
+
 // GET - Fetch all channel mappings
 export async function GET(request: NextRequest) {
   try {
@@ -39,8 +61,14 @@ export async function GET(request: NextRequest) {
     const mappings = activeOnly 
       ? await getActiveChannelMappings() 
       : await getChannelMappings();
-    
-    return NextResponse.json({ success: true, mappings });
+
+    const delayByMappingId = await getMappingPublishDelayHoursMap((mappings || []).map((mapping) => mapping.id));
+    const hydratedMappings = (mappings || []).map((mapping) => ({
+      ...mapping,
+      publish_delay_hours: delayByMappingId.get(mapping.id) ?? null,
+    }));
+
+    return NextResponse.json({ success: true, mappings: hydratedMappings });
   } catch (error) {
     console.error('Mappings GET error:', error);
     return NextResponse.json(
@@ -65,7 +93,8 @@ export async function POST(request: NextRequest) {
       upload_time_morning,
       upload_time_evening,
       default_visibility,
-      ai_enhancement_enabled
+      ai_enhancement_enabled,
+      publish_delay_hours,
     } = body;
     
     if (!name || !source_channel_id || !source_channel_url || !target_channel_id) {
@@ -91,6 +120,7 @@ export async function POST(request: NextRequest) {
     });
     
     if (mapping) {
+      const delaySaved = await setMappingPublishDelayHours(mapping.id, normalizePublishDelayHours(publish_delay_hours));
       const linkedShorts = await linkUnmappedSourceShortsToMapping(
         mapping.id,
         source_channel_id,
@@ -98,7 +128,21 @@ export async function POST(request: NextRequest) {
         target_channel_id
       );
 
-      return NextResponse.json({ success: true, mapping, linked_shorts: linkedShorts });
+      if (!delaySaved) {
+        return NextResponse.json(
+          { success: false, error: 'Mapping created but failed to save publish delay override' },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        mapping: {
+          ...mapping,
+          publish_delay_hours: normalizePublishDelayHours(publish_delay_hours),
+        },
+        linked_shorts: linkedShorts,
+      });
     }
     
     return NextResponse.json(
@@ -118,7 +162,7 @@ export async function POST(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
-    const { id, ...data } = body;
+    const { id, publish_delay_hours, ...data } = body;
     
     if (!id) {
       return NextResponse.json(
@@ -141,8 +185,13 @@ export async function PUT(request: NextRequest) {
       normalizedData.uploads_per_day = normalizeUploadsPerDay(normalizedData.uploads_per_day, 2);
     }
 
-    const success = await updateChannelMapping(id, normalizedData);
-    return NextResponse.json({ success });
+    const hasDelayOverride = Object.prototype.hasOwnProperty.call(body, 'publish_delay_hours');
+    const [success, delaySaved] = await Promise.all([
+      updateChannelMapping(id, normalizedData),
+      hasDelayOverride ? setMappingPublishDelayHours(id, normalizePublishDelayHours(publish_delay_hours)) : Promise.resolve(true),
+    ]);
+
+    return NextResponse.json({ success: success && delaySaved });
   } catch (error) {
     console.error('Mappings PUT error:', error);
     return NextResponse.json(
