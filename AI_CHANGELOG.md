@@ -23,6 +23,16 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 10:15 UTC — Codex
+- Hardened admin credential handling:
+  - Removed hardcoded admin fallback credentials from source.
+  - Admin login now relies on runtime env vars (`ADMIN_EMAIL`, `ADMIN_PASSWORD`) only.
+  - File:
+    - `src/lib/auth/admin.ts`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+
 ### 2026-02-22 10:12 UTC — Codex
 - Reworked routing into public site + protected admin panel:
   - Moved existing operations dashboard from `/` to `/admin`.
