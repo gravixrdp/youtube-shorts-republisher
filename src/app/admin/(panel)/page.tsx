@@ -389,13 +389,16 @@ export default function GRAVIX() {
     setActionLoad((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (options?: { includeLogs?: boolean }) => {
+    const includeLogs = options?.includeLogs ?? false;
     try {
-      const response = await fetch('/api/stats');
+      const response = await fetch(`/api/stats?includeLogs=${includeLogs ? 'true' : 'false'}`);
       const data = await response.json();
       if (data.success) {
         setStats(data.stats);
-        setLogs(data.logs || []);
+        if (includeLogs) {
+          setLogs(data.logs || []);
+        }
         setSchedulerState(data.scheduler);
       }
     } catch (error) {
@@ -405,7 +408,7 @@ export default function GRAVIX() {
 
   const fetchShorts = useCallback(async () => {
     try {
-      const response = await fetch('/api/videos?limit=100');
+      const response = await fetch('/api/videos?limit=100&withTotal=false');
       const data = await response.json();
       if (data.success) {
         setShorts(data.shorts || []);
@@ -488,7 +491,7 @@ export default function GRAVIX() {
       setInitialLoad(true);
       try {
         await Promise.all([
-          fetchStats(),
+          fetchStats({ includeLogs: true }),
           fetchShorts(),
           fetchConfig(),
           fetchMappings(),
@@ -505,15 +508,8 @@ export default function GRAVIX() {
 
     void load();
 
-    const interval = window.setInterval(() => {
-      if (mounted) {
-        void fetchStats();
-      }
-    }, 30000);
-
     return () => {
       mounted = false;
-      window.clearInterval(interval);
     };
   }, [fetchConfig, fetchDestinationChannels, fetchMappings, fetchScrapingMonitor, fetchShorts, fetchSourceChannels, fetchStats]);
 
@@ -604,15 +600,18 @@ export default function GRAVIX() {
     const shouldLivePoll =
       activeTab === 'videos' ||
       activeTab === 'dashboard' ||
-      activeTab === 'mappings';
+      activeTab === 'mappings' ||
+      activeTab === 'logs';
 
     if (!shouldLivePoll) {
       return;
     }
 
-    const intervalMs = activeTab === 'videos' ? 4000 : 10000;
+    const intervalMs = activeTab === 'videos' ? 4000 : activeTab === 'logs' ? 15000 : 12000;
+    const statsIntervalMs = 12000;
     let cancelled = false;
     let inFlight = false;
+    let lastStatsRefresh = 0;
 
     const poll = async () => {
       if (cancelled || inFlight) {
@@ -621,7 +620,23 @@ export default function GRAVIX() {
 
       inFlight = true;
       try {
-        await Promise.all([fetchShorts(), fetchStats()]);
+        if (activeTab === 'videos') {
+          const now = Date.now();
+          const requests: Array<Promise<unknown>> = [fetchShorts()];
+          if (now - lastStatsRefresh >= statsIntervalMs) {
+            lastStatsRefresh = now;
+            requests.push(fetchStats({ includeLogs: false }));
+          }
+          await Promise.all(requests);
+          return;
+        }
+
+        if (activeTab === 'logs') {
+          await fetchStats({ includeLogs: true });
+          return;
+        }
+
+        await Promise.all([fetchShorts(), fetchStats({ includeLogs: false })]);
       } finally {
         inFlight = false;
       }
@@ -642,7 +657,7 @@ export default function GRAVIX() {
     setActionState('refresh', true);
     try {
       await Promise.all([
-        fetchStats(),
+        fetchStats({ includeLogs: true }),
         fetchShorts(),
         fetchMappings(),
         fetchSourceChannels(),

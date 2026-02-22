@@ -1,18 +1,46 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getStats, getRecentLogs, getSchedulerState } from '@/lib/supabase/database';
 
-export async function GET() {
+const SUMMARY_CACHE_TTL_MS = 5000;
+let summaryCache:
+  | {
+      expiresAt: number;
+      stats: Awaited<ReturnType<typeof getStats>>;
+      scheduler: Awaited<ReturnType<typeof getSchedulerState>>;
+    }
+  | null = null;
+
+export async function GET(request: NextRequest) {
   try {
-    const [stats, logs, schedulerState] = await Promise.all([
+    const includeLogs = request.nextUrl.searchParams.get('includeLogs') !== 'false';
+
+    if (!includeLogs && summaryCache && summaryCache.expiresAt > Date.now()) {
+      return NextResponse.json({
+        success: true,
+        stats: summaryCache.stats,
+        logs: [],
+        scheduler: summaryCache.scheduler,
+      });
+    }
+
+    const [stats, schedulerState, logs] = await Promise.all([
       getStats(),
-      getRecentLogs(20),
-      getSchedulerState()
+      getSchedulerState(),
+      includeLogs ? getRecentLogs(20) : Promise.resolve([]),
     ]);
+
+    if (!includeLogs) {
+      summaryCache = {
+        expiresAt: Date.now() + SUMMARY_CACHE_TTL_MS,
+        stats,
+        scheduler: schedulerState,
+      };
+    }
     
     return NextResponse.json({
       success: true,
       stats,
-      logs,
+      logs: includeLogs ? logs : [],
       scheduler: schedulerState
     });
   } catch (error) {

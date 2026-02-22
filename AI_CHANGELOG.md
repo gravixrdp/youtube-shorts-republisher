@@ -23,6 +23,43 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 13:19 UTC — Codex
+- Reduced admin-panel polling load to lower VPS + Supabase pressure:
+  - Removed overlapping base 30s stats interval.
+  - Live polling now runs by tab with lower DB frequency:
+    - `videos`: shorts every 4s, stats every ~12s
+    - `dashboard` / `mappings`: shorts+stats every 12s
+    - `logs`: stats+logs every 15s
+  - `fetchStats` now requests logs only when needed.
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Added lightweight stats API optimization:
+  - `/api/stats` accepts `includeLogs=false`.
+  - Added short in-memory summary cache (5s) for no-log requests.
+  - File:
+    - `src/app/api/stats/route.ts`
+- Reduced video list query cost:
+  - `/api/videos` accepts `withTotal=false` and sanitizes `limit`/`offset`.
+  - `getAllShorts` skips expensive count query when total is not needed.
+  - Admin video polling now calls `withTotal=false`.
+  - Files:
+    - `src/app/api/videos/route.ts`
+    - `src/lib/supabase/database.ts`
+- Added temp-video cleanup into scheduler cleanup flow:
+  - `cleanup_uploaded` now also removes old temp video files from `/tmp/youtube-shorts-republisher`.
+  - Config key supported: `temp_video_cleanup_hours` (default `6`).
+  - File:
+    - `src/app/api/scheduler/route.ts`
+- Runtime cleanup done on VPS:
+  - Stopped unnecessary `premium-website` Vite dev process (port `5173`).
+  - Removed stale temp file in `/tmp/youtube-shorts-republisher`.
+- Verification:
+  - `bunx eslint` on changed files passed.
+  - `bun run build` passed.
+  - Restarted and verified active:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+
 ### 2026-02-22 12:59 UTC — Codex
 - Fixed scraping not pulling Shorts for channels where title/description didn’t include `#shorts`:
   - Shorts classification now relies on duration (`<= 180s`) instead of hashtag keyword presence.

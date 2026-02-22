@@ -33,10 +33,13 @@ async function createScrapeRunLog(
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
-    const limit = parseInt(searchParams.get('limit') || '50');
-    const offset = parseInt(searchParams.get('offset') || '0');
+    const parsedLimit = Number.parseInt(searchParams.get('limit') || '50', 10);
+    const parsedOffset = Number.parseInt(searchParams.get('offset') || '0', 10);
+    const limit = Number.isFinite(parsedLimit) ? Math.min(200, Math.max(1, parsedLimit)) : 50;
+    const offset = Number.isFinite(parsedOffset) ? Math.max(0, parsedOffset) : 0;
     const status = searchParams.get('status');
     const mappingId = searchParams.get('mappingId');
+    const withTotal = searchParams.get('withTotal') !== 'false';
     
     if (status) {
       const { getShortsByStatus } = await import('@/lib/supabase/database');
@@ -44,7 +47,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: true, shorts });
     }
     
-    const { data, total } = await getAllShorts(limit, offset);
+    const { data, total } = await getAllShorts(limit, offset, withTotal);
     return NextResponse.json({ success: true, shorts: data, total });
   } catch (error) {
     console.error('Videos GET error:', error);

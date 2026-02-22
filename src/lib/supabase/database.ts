@@ -723,21 +723,31 @@ export async function getShortsByStatus(status: string): Promise<ShortsData[]> {
   return data || [];
 }
 
-export async function getAllShorts(limit: number = 100, offset: number = 0): Promise<{ data: ShortsData[], total: number }> {
-  const [dataResult, countResult] = await Promise.all([
-    supabaseAdmin
-      .from('shorts_data')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1),
-    supabaseAdmin
-      .from('shorts_data')
-      .select('*', { count: 'exact', head: true })
-  ]);
+export async function getAllShorts(
+  limit: number = 100,
+  offset: number = 0,
+  includeTotal: boolean = true
+): Promise<{ data: ShortsData[]; total: number }> {
+  const dataResult = await supabaseAdmin
+    .from('shorts_data')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (!includeTotal) {
+    return {
+      data: dataResult.data || [],
+      total: 0,
+    };
+  }
+
+  const { count } = await supabaseAdmin
+    .from('shorts_data')
+    .select('*', { count: 'exact', head: true });
 
   return {
     data: dataResult.data || [],
-    total: countResult.count || 0
+    total: count || 0,
   };
 }
 

@@ -15,7 +15,7 @@ import {
   type ChannelMapping,
 } from '@/lib/supabase/database';
 import type { ShortsData } from '@/lib/supabase/client';
-import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
+import { cleanupTempFiles, deleteVideo, downloadVideo, validateVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo, updateVideoVisibility } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
 import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
@@ -43,7 +43,18 @@ async function resolveDestinationRefreshToken(mappingId: string | null): Promise
 
 async function runUploadedCleanup() {
   const cleanupHours = parseInt((await getConfig('uploaded_cleanup_hours')) || '5', 10);
-  return cleanupUploadedShortsForSingleDestination({ olderThanHours: Number.isNaN(cleanupHours) ? 5 : cleanupHours });
+  const tempCleanupHours = parseInt((await getConfig('temp_video_cleanup_hours')) || '6', 10);
+  const dbCleanup = await cleanupUploadedShortsForSingleDestination({
+    olderThanHours: Number.isNaN(cleanupHours) ? 5 : cleanupHours,
+  });
+  const tempDeleted = await cleanupTempFiles(
+    (Number.isNaN(tempCleanupHours) ? 6 : tempCleanupHours) * 60 * 60 * 1000
+  );
+
+  return {
+    ...dbCleanup,
+    temp_deleted: tempDeleted,
+  };
 }
 
 function normalizeComparableTag(value: string): string {
