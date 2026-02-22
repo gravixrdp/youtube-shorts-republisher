@@ -23,6 +23,18 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 10:19 UTC — Codex
+- Fixed admin login session issue on HTTP deployments:
+  - Root cause: admin cookie was always set with `Secure`, so browsers on non-HTTPS URLs did not persist login session.
+  - Fix: set `Secure` cookie flag only when request protocol is HTTPS (`request.nextUrl.protocol` / `x-forwarded-proto`).
+  - Files:
+    - `src/app/api/admin/login/route.ts`
+    - `src/app/api/admin/logout/route.ts`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+  - Login now returns cookie without `Secure` on HTTP and `/admin` stays authenticated after login.
+
 ### 2026-02-22 10:15 UTC — Codex
 - Hardened admin credential handling:
   - Removed hardcoded admin fallback credentials from source.

@@ -18,11 +18,13 @@ export async function POST(request: NextRequest) {
 
     const token = buildAdminSessionToken(email.trim().toLowerCase());
     const response = NextResponse.json({ success: true });
+    const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+    const isSecureRequest = request.nextUrl.protocol === 'https:' || forwardedProto === 'https';
 
     response.cookies.set(ADMIN_SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: isSecureRequest,
       path: '/',
       maxAge: getAdminSessionMaxAge(),
     });
