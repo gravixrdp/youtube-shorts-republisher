@@ -23,6 +23,35 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 10:12 UTC — Codex
+- Reworked routing into public site + protected admin panel:
+  - Moved existing operations dashboard from `/` to `/admin`.
+  - Added guard layout so `/admin` requires valid admin session cookie and redirects to `/admin/login` when unauthenticated.
+  - Files:
+    - `src/app/admin/(panel)/page.tsx`
+    - `src/app/admin/(panel)/layout.tsx`
+- Added admin-only login flow (no signup path):
+  - Added credential validation API (`/api/admin/login`) and logout API (`/api/admin/logout`) with HTTP-only session cookie.
+  - Added session check API (`/api/admin/session`) and login page UX.
+  - Added auth utility for token signing + verification.
+  - Runtime admin credentials configured in `.env`:
+    - `ADMIN_EMAIL=gravixrdp@gmail.com`
+    - `ADMIN_PASSWORD=@VGahir444`
+  - Files:
+    - `src/app/admin/login/page.tsx`
+    - `src/app/api/admin/login/route.ts`
+    - `src/app/api/admin/logout/route.ts`
+    - `src/app/api/admin/session/route.ts`
+    - `src/lib/auth/admin.ts`
+- Replaced root `/` with premium animated landing website:
+  - Added motion-rich hero, 3D glass cards, gradients, CTA to admin login, and mobile-responsive feature sections.
+  - Files:
+    - `src/app/page.tsx`
+    - `src/app/globals.css`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+
 ### 2026-02-22 09:57 UTC — Codex
 - Added per-mapping destination upload slots (destination-wise timing):
   - Scheduler now loads active mappings each minute and matches each mapping's own `upload_time_morning` / `upload_time_evening` in selected `scheduler_timezone`.
