@@ -11,11 +11,11 @@ function readEnv(key: string): string | undefined {
 }
 
 export function getAdminEmail(): string {
-  return readEnv('ADMIN_EMAIL') || 'gravixrdp@gmail.com';
+  return readEnv('ADMIN_EMAIL') || 'admin@example.com';
 }
 
 export function getAdminPassword(): string {
-  return readEnv('ADMIN_PASSWORD') || '@VGahir444';
+  return readEnv('ADMIN_PASSWORD') || '';
 }
 
 function getSessionSecret(): string {
