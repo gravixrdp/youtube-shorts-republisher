@@ -52,11 +52,18 @@ export interface ChannelMapping {
   name: string;
   source_channel_id: string;
   source_channel_url: string;
+  source_channel_name: string | null;
   target_channel_id: string;
-  target_channel_name: string;
+  target_channel_name: string | null;
   is_active: boolean;
   uploads_per_day: number;
+  upload_time_morning: string | null;
+  upload_time_evening: string | null;
+  default_visibility: string | null;
+  ai_enhancement_enabled: boolean;
   last_fetched_at: string | null;
+  total_fetched: number;
+  total_uploaded: number;
   created_at: string;
   updated_at: string;
 }
@@ -319,6 +326,26 @@ export async function getPendingShorts(limit: number = 10, mappingId?: string): 
   const { data, error } = await query;
 
   if (error) return [];
+  return data || [];
+}
+
+export async function getDueScheduledPublishShorts(limit: number = 20): Promise<ShortsData[]> {
+  const nowIso = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from('shorts_data')
+    .select('*')
+    .eq('status', 'Uploaded')
+    .not('scheduled_date', 'is', null)
+    .not('target_video_id', 'is', null)
+    .lte('scheduled_date', nowIso)
+    .order('scheduled_date', { ascending: true })
+    .limit(limit);
+
+  if (error) {
+    console.error('Error loading due scheduled publish shorts:', error);
+    return [];
+  }
+
   return data || [];
 }
 

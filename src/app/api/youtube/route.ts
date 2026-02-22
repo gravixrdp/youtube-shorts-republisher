@@ -11,6 +11,7 @@ import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-h
 import { uploadVideo, getVideoStatus } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
 import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
+import { resolveUploadBehavior } from '@/lib/youtube/upload-settings';
 
 async function resolveDestinationRefreshToken(mappingId: string | null): Promise<{ refreshToken?: string; error?: string }> {
   if (!mappingId) {
@@ -119,11 +120,9 @@ export async function POST(request: NextRequest) {
       await createLog(shortId, 'upload', 'success', 'Starting upload');
       await updateShort(shortId, { status: 'Uploading' });
       
-      // Get visibility setting
-      const visibility = await getConfig('default_visibility') || 'public';
-      
-      // Check if AI enhancement is enabled
-      const aiEnabled = await getConfig('ai_enhancement_enabled') === 'true';
+      const uploadBehavior = await resolveUploadBehavior(short.mapping_id);
+      const visibility = uploadBehavior.visibility;
+      const aiEnabled = uploadBehavior.aiEnabled;
       let title = short.title;
       let description = short.description || '';
       let hashtags: string[] = [];
@@ -170,7 +169,7 @@ export async function POST(request: NextRequest) {
         title,
         description,
         buildUploadTags(short.tags || [], hashtags),
-        visibility as 'public' | 'unlisted' | 'private',
+        visibility,
         {
           refreshToken: destinationAuth.refreshToken
         }
@@ -189,18 +188,30 @@ export async function POST(request: NextRequest) {
       await updateShort(shortId, {
         status: 'Uploaded',
         uploaded_date: new Date().toISOString(),
-        target_video_id: result.videoId
+        target_video_id: result.videoId,
+        scheduled_date: uploadBehavior.scheduledPublishAt,
+        error_log: null,
       });
 
       await runUploadedCleanup();
       
       await deleteVideo(filePath);
       await createLog(shortId, 'upload', 'success', `Uploaded as ${result.videoId}`);
+
+      if (uploadBehavior.scheduledPublishAt) {
+        await createLog(
+          shortId,
+          'publish',
+          'success',
+          `Scheduled public publish at ${uploadBehavior.scheduledPublishAt} (${uploadBehavior.delayHours}h delay)`
+        );
+      }
       
       return NextResponse.json({ 
         success: true, 
         videoId: result.videoId,
-        targetUrl: `https://youtube.com/watch?v=${result.videoId}`
+        targetUrl: `https://youtube.com/watch?v=${result.videoId}`,
+        scheduledPublishAt: uploadBehavior.scheduledPublishAt,
       });
     }
     
@@ -235,8 +246,9 @@ export async function POST(request: NextRequest) {
       await createLog(shortId, 'download', 'success', `Downloaded to ${downloadResult.filePath}`);
       
       // Upload
-      const visibility = await getConfig('default_visibility') || 'public';
-      const aiEnabled = await getConfig('ai_enhancement_enabled') === 'true';
+      const uploadBehavior = await resolveUploadBehavior(short.mapping_id);
+      const visibility = uploadBehavior.visibility;
+      const aiEnabled = uploadBehavior.aiEnabled;
       await updateShort(shortId, { status: 'Uploading' });
       
       let title = short.title;
@@ -273,7 +285,7 @@ export async function POST(request: NextRequest) {
         title,
         description,
         buildUploadTags(short.tags || [], hashtags),
-        visibility as 'public' | 'unlisted' | 'private',
+        visibility,
         {
           refreshToken: destinationAuth.refreshToken
         }
@@ -295,9 +307,20 @@ export async function POST(request: NextRequest) {
         status: 'Uploaded',
         uploaded_date: new Date().toISOString(),
         target_video_id: uploadResult.videoId,
+        scheduled_date: uploadBehavior.scheduledPublishAt,
+        error_log: null,
         ai_title: title !== short.title ? title : null,
         ai_description: description !== short.description ? description : null
       });
+
+      if (uploadBehavior.scheduledPublishAt) {
+        await createLog(
+          shortId,
+          'publish',
+          'success',
+          `Scheduled public publish at ${uploadBehavior.scheduledPublishAt} (${uploadBehavior.delayHours}h delay)`
+        );
+      }
 
       await runUploadedCleanup();
       await createLog(shortId, 'process', 'success', `Uploaded as ${uploadResult.videoId}`);
@@ -305,7 +328,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ 
         success: true, 
         videoId: uploadResult.videoId,
-        targetUrl: `https://youtube.com/watch?v=${uploadResult.videoId}`
+        targetUrl: `https://youtube.com/watch?v=${uploadResult.videoId}`,
+        scheduledPublishAt: uploadBehavior.scheduledPublishAt,
       });
     }
     

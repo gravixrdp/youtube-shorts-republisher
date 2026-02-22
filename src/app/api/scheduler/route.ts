@@ -1,18 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { 
-  getSchedulerState, 
-  updateSchedulerState, 
+import {
+  getSchedulerState,
+  updateSchedulerState,
   getPendingShorts,
   updateShort,
   createLog,
   getConfig,
   getChannelMappingById,
-  cleanupUploadedShortsForSingleDestination
+  cleanupUploadedShortsForSingleDestination,
+  getDueScheduledPublishShorts,
 } from '@/lib/supabase/database';
 import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
-import { uploadVideo } from '@/lib/youtube/uploader';
+import { uploadVideo, updateVideoVisibility } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
 import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
+import { resolveUploadBehavior } from '@/lib/youtube/upload-settings';
 
 async function resolveDestinationRefreshToken(mappingId: string | null): Promise<{ refreshToken?: string; error?: string }> {
   if (!mappingId) {
@@ -47,6 +49,70 @@ function buildUploadTags(existingTags: string[] | null, hashtags: string[]): str
   return Array.from(new Set(tags)).slice(0, 20);
 }
 
+function parseMappingId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = raw.trim();
+  return trimmed || undefined;
+}
+
+function nextRetryTime(minutes: number): string {
+  return new Date(Date.now() + minutes * 60 * 1000).toISOString();
+}
+
+async function publishDueScheduledShorts(limit: number = 20): Promise<{ checked: number; published: number; failed: number }> {
+  const dueShorts = await getDueScheduledPublishShorts(limit);
+  let published = 0;
+  let failed = 0;
+
+  for (const short of dueShorts) {
+    if (!short.target_video_id) {
+      continue;
+    }
+
+    const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
+    if (destinationAuth.error) {
+      failed++;
+      await updateShort(short.id, {
+        error_log: destinationAuth.error,
+        scheduled_date: nextRetryTime(15),
+      });
+      await createLog(short.id, 'publish', 'error', destinationAuth.error);
+      continue;
+    }
+
+    const publishResult = await updateVideoVisibility(short.target_video_id, 'public', {
+      refreshToken: destinationAuth.refreshToken,
+    });
+
+    if (!publishResult.success) {
+      const errorMessage = publishResult.error || 'Failed to switch visibility to public';
+      failed++;
+      await updateShort(short.id, {
+        error_log: errorMessage,
+        scheduled_date: nextRetryTime(15),
+      });
+      await createLog(short.id, 'publish', 'error', errorMessage);
+      continue;
+    }
+
+    published++;
+    await updateShort(short.id, {
+      scheduled_date: null,
+      error_log: null,
+    });
+    await createLog(short.id, 'publish', 'success', `Video ${short.target_video_id} switched to public`);
+  }
+
+  return {
+    checked: dueShorts.length,
+    published,
+    failed,
+  };
+}
+
 // GET - Get scheduler state
 export async function GET() {
   try {
@@ -66,27 +132,27 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { action } = body;
-    
+
     // Start scheduler run
     if (action === 'run') {
       const state = await getSchedulerState();
-      
+
       if (state?.is_running) {
         return NextResponse.json(
           { success: false, error: 'Scheduler is already running' },
           { status: 400 }
         );
       }
-      
+
       // Start async upload process
       runSchedulerProcess().catch(console.error);
-      
-      return NextResponse.json({ 
-        success: true, 
-        message: 'Scheduler started' 
+
+      return NextResponse.json({
+        success: true,
+        message: 'Scheduler started'
       });
     }
-    
+
     // Update scheduler settings
     if (action === 'update') {
       const { isRunning, uploadsToday } = body;
@@ -96,12 +162,19 @@ export async function POST(request: NextRequest) {
       });
       return NextResponse.json({ success });
     }
-    
+
     // Process next pending video
     if (action === 'process_next') {
-      const result = await processNextPending();
+      const mappingId = parseMappingId(body.mappingId);
+      const result = await processNextPending(mappingId);
+      const publish = await publishDueScheduledShorts();
       await runUploadedCleanup();
-      return NextResponse.json(result);
+      return NextResponse.json({ ...result, publish });
+    }
+
+    if (action === 'publish_due') {
+      const publish = await publishDueScheduledShorts(typeof body.limit === 'number' ? body.limit : 20);
+      return NextResponse.json({ success: true, publish });
     }
 
     // Cleanup uploaded shorts that can be safely removed
@@ -122,7 +195,7 @@ export async function POST(request: NextRequest) {
         cleanup
       });
     }
-    
+
     return NextResponse.json(
       { success: false, error: 'Invalid action' },
       { status: 400 }
@@ -137,44 +210,45 @@ export async function POST(request: NextRequest) {
 }
 
 // Process the next pending video
-async function processNextPending(): Promise<{ success: boolean; message: string; videoId?: string }> {
+async function processNextPending(mappingId?: string): Promise<{ success: boolean; message: string; videoId?: string }> {
   try {
-    // Get uploads per day limit
-    const uploadsPerDay = parseInt(await getConfig('uploads_per_day') || '2');
     const state = await getSchedulerState();
-    
-    if (state && state.uploads_today >= uploadsPerDay) {
-      return { success: false, message: 'Daily upload limit reached' };
+
+    if (!mappingId) {
+      const uploadsPerDay = parseInt((await getConfig('uploads_per_day')) || '2', 10);
+      if (state && state.uploads_today >= uploadsPerDay) {
+        return { success: false, message: 'Daily upload limit reached' };
+      }
     }
-    
+
     // Get next pending video
-    const pending = await getPendingShorts(1);
+    const pending = await getPendingShorts(1, mappingId);
     if (pending.length === 0) {
-      return { success: false, message: 'No pending videos' };
+      return { success: false, message: mappingId ? 'No pending videos for this destination slot' : 'No pending videos' };
     }
-    
+
     const short = pending[0];
-    
+
     await createLog(short.id, 'process', 'success', 'Starting automated upload');
-    
+
     // Download
     const downloadResult = await downloadVideo(short.video_url, short.video_id);
     if (!downloadResult.success) {
-      await updateShort(short.id, { 
-        status: 'Failed', 
-        error_log: downloadResult.error 
+      await updateShort(short.id, {
+        status: 'Failed',
+        error_log: downloadResult.error
       });
       await createLog(short.id, 'download', 'error', downloadResult.error || 'Download failed');
       return { success: false, message: `Download failed: ${downloadResult.error}` };
     }
-    
+
     // Validate
     const validation = await validateVideo(downloadResult.filePath!);
     if (!validation.valid) {
       await deleteVideo(downloadResult.filePath!);
-      await updateShort(short.id, { 
-        status: 'Failed', 
-        error_log: validation.error 
+      await updateShort(short.id, {
+        status: 'Failed',
+        error_log: validation.error
       });
       await createLog(short.id, 'validation', 'error', validation.error || 'Validation failed');
       return { success: false, message: `Validation failed: ${validation.error}` };
@@ -182,15 +256,16 @@ async function processNextPending(): Promise<{ success: boolean; message: string
 
     await updateShort(short.id, { status: 'Downloaded' });
     await createLog(short.id, 'download', 'success', `Downloaded to ${downloadResult.filePath}`);
-    
+
     // Prepare content
-    const visibility = await getConfig('default_visibility') || 'public';
-    const aiEnabled = await getConfig('ai_enhancement_enabled') === 'true';
-    
+    const uploadBehavior = await resolveUploadBehavior(short.mapping_id || mappingId || null);
+    const visibility = uploadBehavior.visibility;
+    const aiEnabled = uploadBehavior.aiEnabled;
+
     let title = short.title;
     let description = short.description || '';
     let hashtags: string[] = [];
-    
+
     if (aiEnabled) {
       try {
         const enhanced = await enhanceContent(short.title, short.description || '', short.tags || []);
@@ -201,7 +276,7 @@ async function processNextPending(): Promise<{ success: boolean; message: string
         // Use original content
       }
     }
-    
+
     if (hashtags.length > 0) {
       description = `${description}\n\n${hashtags.join(' ')}`;
     }
@@ -218,55 +293,69 @@ async function processNextPending(): Promise<{ success: boolean; message: string
     }
 
     await updateShort(short.id, { status: 'Uploading' });
-    
+
     // Upload
     const uploadResult = await uploadVideo(
       downloadResult.filePath!,
       title,
       description,
       buildUploadTags(short.tags || [], hashtags),
-      visibility as 'public' | 'unlisted' | 'private',
+      visibility,
       {
         refreshToken: destinationAuth.refreshToken
       }
     );
-    
+
     // Clean up
     await deleteVideo(downloadResult.filePath!);
-    
+
     if (!uploadResult.success) {
-      await updateShort(short.id, { 
-        status: 'Failed', 
-        error_log: uploadResult.error 
+      await updateShort(short.id, {
+        status: 'Failed',
+        error_log: uploadResult.error
       });
       await createLog(short.id, 'upload', 'error', uploadResult.error || 'Upload failed');
       return { success: false, message: `Upload failed: ${uploadResult.error}` };
     }
-    
+
     // Update success
+    const uploadedAt = new Date().toISOString();
     await updateShort(short.id, {
       status: 'Uploaded',
-      uploaded_date: new Date().toISOString(),
-      target_video_id: uploadResult.videoId
+      uploaded_date: uploadedAt,
+      target_video_id: uploadResult.videoId || null,
+      scheduled_date: uploadBehavior.scheduledPublishAt,
+      error_log: null,
     });
     await createLog(short.id, 'upload', 'success', `Uploaded as ${uploadResult.videoId}`);
-    
+
+    if (uploadBehavior.scheduledPublishAt) {
+      await createLog(
+        short.id,
+        'publish',
+        'success',
+        `Scheduled public publish at ${uploadBehavior.scheduledPublishAt} (${uploadBehavior.delayHours}h delay)`
+      );
+    }
+
     // Update scheduler state
     await updateSchedulerState({
       uploads_today: (state?.uploads_today || 0) + 1,
-      last_run_at: new Date().toISOString()
+      last_run_at: uploadedAt
     });
-    
-    return { 
-      success: true, 
-      message: 'Upload successful', 
-      videoId: uploadResult.videoId 
+
+    return {
+      success: true,
+      message: uploadBehavior.scheduledPublishAt
+        ? `Upload successful, public publish scheduled after ${uploadBehavior.delayHours}h`
+        : 'Upload successful',
+      videoId: uploadResult.videoId
     };
   } catch (error) {
     console.error('Process error:', error);
-    return { 
-      success: false, 
-      message: error instanceof Error ? error.message : 'Unknown error' 
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Unknown error'
     };
   }
 }
@@ -274,9 +363,9 @@ async function processNextPending(): Promise<{ success: boolean; message: string
 // Background scheduler process
 async function runSchedulerProcess(): Promise<void> {
   try {
-    await updateSchedulerState({ 
-      is_running: true, 
-      current_status: 'Processing...' 
+    await updateSchedulerState({
+      is_running: true,
+      current_status: 'Processing...'
     });
 
     // Process only one short per scheduler run.
@@ -287,17 +376,18 @@ async function runSchedulerProcess(): Promise<void> {
       console.log('Uploaded:', result.videoId);
     }
 
+    await publishDueScheduledShorts();
     await runUploadedCleanup();
-    
-    await updateSchedulerState({ 
-      is_running: false, 
-      current_status: 'Completed' 
+
+    await updateSchedulerState({
+      is_running: false,
+      current_status: 'Completed'
     });
   } catch (error) {
     console.error('Scheduler error:', error);
-    await updateSchedulerState({ 
-      is_running: false, 
-      current_status: 'Error' 
+    await updateSchedulerState({
+      is_running: false,
+      current_status: 'Error'
     });
   }
 }

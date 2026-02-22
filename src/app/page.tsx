@@ -97,8 +97,8 @@ interface ChannelMapping {
   target_channel_name: string | null;
   is_active: boolean;
   uploads_per_day: number;
-  upload_time_morning: string;
-  upload_time_evening: string;
+  upload_time_morning: string | null;
+  upload_time_evening: string | null;
   default_visibility: string;
   ai_enhancement_enabled: boolean;
   last_fetched_at: string | null;
@@ -193,6 +193,8 @@ const DEFAULT_MAPPING_FORM = {
   source_channel_url: '',
   target_channel_id: '',
   uploads_per_day: 2,
+  upload_time_morning: '09:00',
+  upload_time_evening: '18:00',
   default_visibility: 'public',
   ai_enhancement_enabled: false,
 };
@@ -792,7 +794,12 @@ export default function GRAVIX() {
       const data = await response.json();
 
       if (data.success) {
-        toast({ title: 'Success', description: 'Video uploaded successfully!' });
+        toast({
+          title: 'Success',
+          description: data.scheduledPublishAt
+            ? `Uploaded. Auto publish scheduled at ${new Date(data.scheduledPublishAt).toLocaleString()}.`
+            : 'Video uploaded successfully!',
+        });
         await Promise.all([fetchShorts(), fetchStats(), fetchScrapingMonitor()]);
       } else {
         toast({ title: 'Error', description: data.error, variant: 'destructive' });
@@ -980,6 +987,8 @@ export default function GRAVIX() {
         source_channel_url: mapping.source_channel_url,
         target_channel_id: mapping.target_channel_id,
         uploads_per_day: mapping.uploads_per_day,
+        upload_time_morning: mapping.upload_time_morning || '09:00',
+        upload_time_evening: mapping.upload_time_evening || '18:00',
         default_visibility: mapping.default_visibility,
         ai_enhancement_enabled: mapping.ai_enhancement_enabled,
       });
@@ -1904,6 +1913,9 @@ export default function GRAVIX() {
                           <Badge variant="outline" className="text-[10px]">
                             {mapping.uploads_per_day}/day
                           </Badge>
+                          <Badge variant="outline" className="text-[10px]">
+                            {mapping.upload_time_morning || '09:00'} / {mapping.upload_time_evening || '18:00'}
+                          </Badge>
                         </CardFooter>
                       </Card>
                     );
@@ -2263,7 +2275,7 @@ export default function GRAVIX() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
                       <div>
                         <Label className="text-xs">Uploads/Day</Label>
                         <Select
@@ -2337,9 +2349,35 @@ export default function GRAVIX() {
                           </SelectContent>
                         </Select>
                       </div>
+
+                      <div>
+                        <Label className="text-xs">Auto Publish Delay</Label>
+                        <Select
+                          value={config.unlisted_publish_delay_hours || '0'}
+                          onValueChange={(value) =>
+                            setConfig({
+                              ...config,
+                              unlisted_publish_delay_hours: value,
+                            })
+                          }
+                        >
+                          <SelectTrigger className="mt-1 h-9 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="0">Off</SelectItem>
+                            <SelectItem value="1">1 hour</SelectItem>
+                            <SelectItem value="2">2 hours</SelectItem>
+                            <SelectItem value="3">3 hours</SelectItem>
+                            <SelectItem value="6">6 hours</SelectItem>
+                            <SelectItem value="12">12 hours</SelectItem>
+                            <SelectItem value="24">24 hours</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                     <p className="text-[10px] text-muted-foreground">
-                      Automation scheduler runs with selected timezone.
+                      Automation scheduler runs with selected timezone. Auto publish delay applies only to unlisted/private uploads.
                     </p>
 
                     <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/25 px-3 py-3">
@@ -2615,7 +2653,7 @@ export default function GRAVIX() {
               <p className="mt-1 text-[10px] text-muted-foreground">Use Connect to load your destination channels.</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <Label className="text-xs">Uploads/Day</Label>
                 <Select
@@ -2641,6 +2679,36 @@ export default function GRAVIX() {
               </div>
 
               <div>
+                <Label className="text-xs">Morning Slot</Label>
+                <Input
+                  type="time"
+                  value={newMapping.upload_time_morning}
+                  onChange={(event) =>
+                    setNewMapping({
+                      ...newMapping,
+                      upload_time_morning: event.target.value,
+                    })
+                  }
+                  className="mt-1.5"
+                />
+              </div>
+
+              <div>
+                <Label className="text-xs">Evening Slot</Label>
+                <Input
+                  type="time"
+                  value={newMapping.upload_time_evening}
+                  onChange={(event) =>
+                    setNewMapping({
+                      ...newMapping,
+                      upload_time_evening: event.target.value,
+                    })
+                  }
+                  className="mt-1.5"
+                />
+              </div>
+
+              <div>
                 <Label className="text-xs">Visibility</Label>
                 <Select
                   value={newMapping.default_visibility}
@@ -2657,6 +2725,9 @@ export default function GRAVIX() {
                 </Select>
               </div>
             </div>
+            <p className="text-[10px] text-muted-foreground">
+              These mapping slots run in the Scheduler Timezone set under Configuration.
+            </p>
 
             <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/25 px-3 py-3">
               <div>

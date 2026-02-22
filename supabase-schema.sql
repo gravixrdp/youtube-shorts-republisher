@@ -322,6 +322,7 @@ INSERT INTO config (key, value) VALUES
     ('upload_time_evening', '18:00'),
     ('scheduler_timezone', 'UTC'),
     ('default_visibility', 'public'),
+    ('unlisted_publish_delay_hours', '0'),
     ('ai_enhancement_enabled', 'false'),
     ('gemini_api_key', ''),
     ('gemini_model', 'gemini-2.5-flash'),

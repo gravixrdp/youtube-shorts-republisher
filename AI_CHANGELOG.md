@@ -23,6 +23,29 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 09:57 UTC — Codex
+- Added per-mapping destination upload slots (destination-wise timing):
+  - Scheduler now loads active mappings each minute and matches each mapping's own `upload_time_morning` / `upload_time_evening` in selected `scheduler_timezone`.
+  - Mapping slots now trigger mapping-specific queue runs via `/api/scheduler` `process_next` with `mappingId`.
+  - Files:
+    - `mini-services/scheduler/index.ts`
+    - `src/app/api/scheduler/route.ts`
+    - `src/app/api/mappings/route.ts`
+    - `src/app/page.tsx`
+- Added delayed auto-publish flow for unlisted/private uploads:
+  - New config key `unlisted_publish_delay_hours` (0=off, 1/2/... hours) added to Config UI and schema defaults.
+  - Upload pipeline now stores delayed publish timestamp in `shorts_data.scheduled_date` when visibility is unlisted/private and delay > 0.
+  - Scheduler/API now promotes due videos to `public` automatically using YouTube `videos.update` and retries failed publish transitions after 15 minutes.
+  - Files:
+    - `src/lib/youtube/upload-settings.ts`
+    - `src/lib/youtube/uploader.ts`
+    - `src/lib/supabase/database.ts`
+    - `src/app/api/youtube/route.ts`
+    - `src/app/api/scheduler/route.ts`
+    - `supabase-schema.sql`
+- Verification:
+  - `npm run build` passed.
+
 ### 2026-02-21 22:16 UTC — Codex
 - Switched AI enhancement pipeline to Gemini API (replaced old `z-ai-web-dev-sdk` chat flow):
   - Rebuilt `src/lib/ai-enhancement.ts` to use Google Gemini REST `generateContent`.

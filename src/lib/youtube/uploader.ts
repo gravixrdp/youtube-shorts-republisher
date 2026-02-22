@@ -240,6 +240,60 @@ export async function uploadVideoWithProgress(
   }
 }
 
+export async function updateVideoVisibility(
+  videoId: string,
+  visibility: 'public' | 'unlisted' | 'private',
+  options?: {
+    refreshToken?: string;
+    publishAt?: string;
+  }
+): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  try {
+    const accessToken = await getAccessToken(options?.refreshToken);
+    if (!accessToken) {
+      return { success: false, error: 'Failed to get access token' };
+    }
+
+    const statusPayload: Record<string, unknown> = {
+      privacyStatus: visibility,
+      selfDeclaredMadeForKids: false,
+    };
+
+    if (visibility === 'private' && options?.publishAt) {
+      statusPayload.publishAt = options.publishAt;
+    }
+
+    const response = await fetch('https://www.googleapis.com/youtube/v3/videos?part=status', {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: videoId,
+        status: statusPayload,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('Visibility update failed:', error);
+      return { success: false, error: `Visibility update failed: ${error}` };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Visibility update error:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Visibility update failed',
+    };
+  }
+}
+
 // Get video upload status
 export async function getVideoStatus(videoId: string): Promise<{
   success: boolean;

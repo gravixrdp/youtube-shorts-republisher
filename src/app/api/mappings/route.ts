@@ -2,11 +2,33 @@ import { NextRequest, NextResponse } from 'next/server';
 import { 
   getChannelMappings, 
   getActiveChannelMappings,
+  type ChannelMapping,
   createChannelMapping, 
   updateChannelMapping, 
   deleteChannelMapping,
   linkUnmappedSourceShortsToMapping
 } from '@/lib/supabase/database';
+
+function normalizeTime(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(trimmed) ? trimmed : fallback;
+}
+
+function normalizeUploadsPerDay(value: unknown, fallback: number): number {
+  const numeric = typeof value === 'number' ? value : Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return fallback;
+  }
+  return Math.min(24, Math.max(1, Math.floor(numeric)));
+}
 
 // GET - Fetch all channel mappings
 export async function GET(request: NextRequest) {
@@ -60,9 +82,9 @@ export async function POST(request: NextRequest) {
       source_channel_name,
       target_channel_id,
       target_channel_name,
-      uploads_per_day: uploads_per_day || 2,
-      upload_time_morning: upload_time_morning || '09:00',
-      upload_time_evening: upload_time_evening || '18:00',
+      uploads_per_day: normalizeUploadsPerDay(uploads_per_day, 2),
+      upload_time_morning: normalizeTime(upload_time_morning, '09:00'),
+      upload_time_evening: normalizeTime(upload_time_evening, '18:00'),
       default_visibility: default_visibility || 'public',
       ai_enhancement_enabled: ai_enhancement_enabled || false,
       is_active: true
@@ -105,7 +127,21 @@ export async function PUT(request: NextRequest) {
       );
     }
     
-    const success = await updateChannelMapping(id, data);
+    const normalizedData = { ...data } as Partial<ChannelMapping> & Record<string, unknown>;
+
+    if ('upload_time_morning' in normalizedData) {
+      normalizedData.upload_time_morning = normalizeTime(normalizedData.upload_time_morning, '09:00');
+    }
+
+    if ('upload_time_evening' in normalizedData) {
+      normalizedData.upload_time_evening = normalizeTime(normalizedData.upload_time_evening, '18:00');
+    }
+
+    if ('uploads_per_day' in normalizedData) {
+      normalizedData.uploads_per_day = normalizeUploadsPerDay(normalizedData.uploads_per_day, 2);
+    }
+
+    const success = await updateChannelMapping(id, normalizedData);
     return NextResponse.json({ success });
   } catch (error) {
     console.error('Mappings PUT error:', error);

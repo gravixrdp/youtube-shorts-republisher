@@ -4,10 +4,25 @@ const MAIN_APP_URL = process.env.MAIN_APP_URL || 'http://127.0.0.1:3000';
 const SCHEDULER_PORT = Number(process.env.SCHEDULER_PORT || '3002');
 const SCHEDULER_HOST = process.env.SCHEDULER_HOST || '0.0.0.0';
 
+interface SchedulerJob {
+  mappingId?: string;
+  mappingName?: string;
+  slotLabel: string;
+  slotTime: string;
+}
+
+interface MappingScheduleConfig {
+  id: string;
+  name?: string;
+  uploads_per_day?: number;
+  upload_time_morning?: string | null;
+  upload_time_evening?: string | null;
+}
+
 // Store scheduler state in memory
 let isRunning = false;
 let lastRunTime: Date | null = null;
-let lastScheduleTriggerKey: string | null = null;
+const firedTriggerKeys = new Map<string, number>();
 
 console.log('📅 YouTube Shorts Scheduler Service Started');
 console.log(`🔗 Main App URL: ${MAIN_APP_URL}`);
@@ -24,7 +39,7 @@ async function callMainApp(endpoint: string, method: string = 'GET', body?: any)
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    
+
     return await response.json();
   } catch (error) {
     console.error('API call failed:', error);
@@ -83,65 +98,109 @@ function getDateTimeInTimezone(date: Date, timeZone: string): { date: string; ti
   }
 }
 
-// Check if automation is enabled and run uploads
-async function checkAndRunUploads(prefetchedConfig?: Record<string, string>) {
+function cleanupTriggerCache(nowMs: number) {
+  const maxAgeMs = 3 * 24 * 60 * 60 * 1000;
+  for (const [key, timestamp] of firedTriggerKeys.entries()) {
+    if (nowMs - timestamp > maxAgeMs) {
+      firedTriggerKeys.delete(key);
+    }
+  }
+}
+
+function shouldFireTrigger(triggerKey: string): boolean {
+  const nowMs = Date.now();
+  cleanupTriggerCache(nowMs);
+
+  if (firedTriggerKeys.has(triggerKey)) {
+    return false;
+  }
+
+  firedTriggerKeys.set(triggerKey, nowMs);
+  return true;
+}
+
+async function runSchedulerJobs(
+  jobs: SchedulerJob[],
+  options?: { prefetchedConfig?: Record<string, string>; requireAutomation?: boolean }
+) {
+  if (jobs.length === 0) {
+    return;
+  }
+
   if (isRunning) {
     console.log('⏳ Scheduler already running, skipping...');
     return;
   }
-  
+
   try {
     isRunning = true;
-    console.log('🔍 Checking for pending uploads...');
-    
-    // Get configuration
-    const configResult = prefetchedConfig ? { config: prefetchedConfig } : await callMainApp('/config');
+    const configResult = options?.prefetchedConfig ? { config: options.prefetchedConfig } : await callMainApp('/config');
     const config = configResult.config || {};
-    
-    // Check if automation is enabled
-    if (config.automation_enabled !== 'true') {
+    const requireAutomation = options?.requireAutomation !== false;
+
+    if (requireAutomation && config.automation_enabled !== 'true') {
       console.log('⏸️ Automation is disabled');
       return;
     }
-    
-    // Get uploads per day
-    const uploadsPerDay = parseInt(config.uploads_per_day || '2');
-    
-    // Get scheduler state
-    const stateResult = await callMainApp('/scheduler');
-    const state = stateResult.state;
-    
-    // Check if daily limit reached
-    if (state && state.uploads_today >= uploadsPerDay) {
-      console.log('📊 Daily upload limit reached');
-      return;
+
+    console.log(`🚀 Starting scheduled batch (${jobs.length} job${jobs.length > 1 ? 's' : ''})...`);
+
+    for (const job of jobs) {
+      const payload: Record<string, unknown> = { action: 'process_next' };
+      if (job.mappingId) {
+        payload.mappingId = job.mappingId;
+      }
+
+      const target = job.mappingName ? `${job.mappingName} (${job.mappingId})` : 'global queue';
+      console.log(`🧭 Triggering ${target} at ${job.slotTime} [${job.slotLabel}]`);
+
+      const result = await callMainApp('/scheduler', 'POST', payload);
+      if (!result.success) {
+        console.log('❌ Upload skipped/failed:', result.message || result.error || 'Unknown error');
+      } else {
+        console.log('✅ Upload successful:', result.videoId);
+      }
     }
-    
-    // Run one upload per schedule trigger.
-    console.log('🚀 Starting scheduled upload...');
-    
-    const result = await callMainApp('/scheduler', 'POST', { 
-      action: 'process_next' 
+
+    const publishResult = await callMainApp('/scheduler', 'POST', {
+      action: 'publish_due',
+      limit: 20,
     });
-    
-    if (!result.success) {
-      console.log('❌ Upload failed:', result.message);
-    } else {
-      console.log('✅ Upload successful:', result.videoId);
+
+    const publishStats = publishResult?.publish;
+    if (publishStats && (publishStats.published > 0 || publishStats.failed > 0)) {
+      console.log(
+        `📣 Delayed publish check: checked=${publishStats.checked}, published=${publishStats.published}, failed=${publishStats.failed}`
+      );
     }
 
     await callMainApp('/scheduler', 'POST', {
-      action: 'cleanup_uploaded'
+      action: 'cleanup_uploaded',
     });
-    
+
     lastRunTime = new Date();
-    console.log('✨ Scheduler run completed at:', lastRunTime.toISOString());
-    
+    console.log('✨ Scheduler batch completed at:', lastRunTime.toISOString());
   } catch (error) {
     console.error('❌ Scheduler error:', error);
   } finally {
     isRunning = false;
   }
+}
+
+// Check if automation is enabled and run one global queue upload.
+async function checkAndRunUploads(prefetchedConfig?: Record<string, string>) {
+  await runSchedulerJobs(
+    [
+      {
+        slotLabel: 'manual',
+        slotTime: 'manual',
+      },
+    ],
+    {
+      prefetchedConfig,
+      requireAutomation: false,
+    }
+  );
 }
 
 async function checkConfiguredTimeSlots() {
@@ -154,32 +213,103 @@ async function checkConfiguredTimeSlots() {
 
   const rawTimezone = typeof config.scheduler_timezone === 'string' ? config.scheduler_timezone.trim() : 'UTC';
   const schedulerTimezone = rawTimezone || 'UTC';
-  const morningTime = normalizeTimeValue(config.upload_time_morning, '09:00');
-  const eveningTime = normalizeTimeValue(config.upload_time_evening, '18:00');
+  const globalMorningTime = normalizeTimeValue(config.upload_time_morning, '09:00');
+  const globalEveningTime = normalizeTimeValue(config.upload_time_evening, '18:00');
+
   const now = new Date();
   const nowInTimezone = getDateTimeInTimezone(now, schedulerTimezone);
   const nowTime = nowInTimezone.time;
 
-  const matchingSlots: string[] = [];
-  if (nowTime === morningTime) {
-    matchingSlots.push(`morning@${morningTime}`);
-  }
-  if (nowTime === eveningTime) {
-    matchingSlots.push(`evening@${eveningTime}`);
+  const mappingsResponse = await callMainApp('/mappings?active=true');
+  const mappings: MappingScheduleConfig[] = Array.isArray(mappingsResponse?.mappings)
+    ? mappingsResponse.mappings
+    : [];
+
+  const jobs: SchedulerJob[] = [];
+
+  for (const mapping of mappings) {
+    if (!mapping?.id) {
+      continue;
+    }
+
+    const uploadsPerDay = Number.parseInt(String(mapping.uploads_per_day ?? '2'), 10);
+    const normalizedUploadsPerDay = Number.isFinite(uploadsPerDay) && uploadsPerDay > 0 ? uploadsPerDay : 2;
+
+    const mappingMorning = normalizeTimeValue(mapping.upload_time_morning, globalMorningTime);
+    const mappingEvening = normalizeTimeValue(mapping.upload_time_evening, globalEveningTime);
+
+    const slotCandidates: Array<{ label: string; time: string }> = [{ label: 'morning', time: mappingMorning }];
+
+    if (normalizedUploadsPerDay > 1 && mappingEvening !== mappingMorning) {
+      slotCandidates.push({ label: 'evening', time: mappingEvening });
+    }
+
+    for (const slot of slotCandidates) {
+      if (slot.time !== nowTime) {
+        continue;
+      }
+
+      const triggerKey = `${schedulerTimezone}:${nowInTimezone.date}:${mapping.id}:${slot.label}@${slot.time}`;
+      if (!shouldFireTrigger(triggerKey)) {
+        continue;
+      }
+
+      jobs.push({
+        mappingId: mapping.id,
+        mappingName: mapping.name || mapping.id,
+        slotLabel: slot.label,
+        slotTime: slot.time,
+      });
+    }
   }
 
-  if (matchingSlots.length === 0) {
+  if (jobs.length === 0) {
+    const globalSlots: Array<{ label: string; time: string }> = [{ label: 'global-morning', time: globalMorningTime }];
+    if (globalEveningTime !== globalMorningTime) {
+      globalSlots.push({ label: 'global-evening', time: globalEveningTime });
+    }
+
+    for (const slot of globalSlots) {
+      if (slot.time !== nowTime) {
+        continue;
+      }
+
+      const triggerKey = `${schedulerTimezone}:${nowInTimezone.date}:global:${slot.label}@${slot.time}`;
+      if (!shouldFireTrigger(triggerKey)) {
+        continue;
+      }
+
+      jobs.push({
+        slotLabel: slot.label,
+        slotTime: slot.time,
+      });
+    }
+  }
+
+  if (jobs.length === 0) {
     return;
   }
 
-  const triggerKey = `${schedulerTimezone}:${nowInTimezone.date}:${matchingSlots.join('|')}`;
-  if (lastScheduleTriggerKey === triggerKey) {
-    return;
-  }
+  const labels = jobs
+    .map((job) => `${job.mappingName || 'global'}@${job.slotTime}`)
+    .join(', ');
 
-  lastScheduleTriggerKey = triggerKey;
-  console.log(`🕒 Matched configured slot (${matchingSlots.join(', ')}) [tz=${schedulerTimezone}], triggering upload check...`);
-  await checkAndRunUploads(config);
+  console.log(`🕒 Matched configured slot(s): ${labels} [tz=${schedulerTimezone}]`);
+  await runSchedulerJobs(jobs, { prefetchedConfig: config, requireAutomation: true });
+}
+
+async function checkDelayedPublishQueue() {
+  const result = await callMainApp('/scheduler', 'POST', {
+    action: 'publish_due',
+    limit: 20,
+  });
+
+  const publish = result?.publish;
+  if (publish && (publish.published > 0 || publish.failed > 0)) {
+    console.log(
+      `📣 Delayed publish queue: checked=${publish.checked}, published=${publish.published}, failed=${publish.failed}`
+    );
+  }
 }
 
 // Reset daily counter at midnight
@@ -192,10 +322,14 @@ async function resetDailyCounter() {
   });
 }
 
-// Check configured schedule every minute (UTC).
+// Check configured schedule and delayed publish queue every minute.
 cron.schedule('* * * * *', () => {
   checkConfiguredTimeSlots().catch((error) => {
     console.error('Configured schedule check failed:', error);
+  });
+
+  checkDelayedPublishQueue().catch((error) => {
+    console.error('Delayed publish check failed:', error);
   });
 }, {
   timezone: 'UTC'
@@ -230,7 +364,7 @@ const server = Bun.serve({
   port: SCHEDULER_PORT,
   async fetch(req) {
     const url = new URL(req.url);
-    
+
     if (url.pathname === '/health') {
       return Response.json({
         status: 'healthy',
@@ -238,38 +372,39 @@ const server = Bun.serve({
         lastRunTime: lastRunTime?.toISOString() || null
       });
     }
-    
+
     if (url.pathname === '/trigger' && req.method === 'POST') {
       if (isRunning) {
-        return Response.json({ 
-          success: false, 
-          message: 'Scheduler is already running' 
+        return Response.json({
+          success: false,
+          message: 'Scheduler is already running'
         });
       }
-      
+
       // Run async
       checkAndRunUploads();
-      
-      return Response.json({ 
-        success: true, 
-        message: 'Scheduler triggered' 
+
+      return Response.json({
+        success: true,
+        message: 'Scheduler triggered'
       });
     }
-    
+
     if (url.pathname === '/status') {
       const configResult = await callMainApp('/config');
       const stateResult = await callMainApp('/scheduler');
-      
+
       return Response.json({
         scheduler: {
           isRunning,
-          lastRunTime: lastRunTime?.toISOString() || null
+          lastRunTime: lastRunTime?.toISOString() || null,
+          cachedTriggerKeys: firedTriggerKeys.size,
         },
         config: configResult.config,
         state: stateResult.state
       });
     }
-    
+
     return Response.json({ error: 'Not found' }, { status: 404 });
   }
 });
