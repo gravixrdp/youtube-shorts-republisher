@@ -381,6 +381,7 @@ export default function GRAVIX() {
   const [activeShortId, setActiveShortId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [isWindowVisible, setIsWindowVisible] = useState(true);
 
   const setActionState = useCallback((key: ActionKey, value: boolean) => {
     setActionLoad((prev) => ({ ...prev, [key]: value }));
@@ -579,6 +580,61 @@ export default function GRAVIX() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setIsWindowVisible(document.visibilityState === 'visible');
+    };
+
+    handleVisibilityChange();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isWindowVisible) {
+      return;
+    }
+
+    const shouldLivePoll =
+      activeTab === 'videos' ||
+      activeTab === 'dashboard' ||
+      activeTab === 'mappings';
+
+    if (!shouldLivePoll) {
+      return;
+    }
+
+    const intervalMs = activeTab === 'videos' ? 4000 : 10000;
+    let cancelled = false;
+    let inFlight = false;
+
+    const poll = async () => {
+      if (cancelled || inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      try {
+        await Promise.all([fetchShorts(), fetchStats()]);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, intervalMs);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeTab, fetchShorts, fetchStats, isWindowVisible]);
 
   const refreshAll = useCallback(async () => {
     setActionState('refresh', true);
@@ -2508,7 +2564,9 @@ export default function GRAVIX() {
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <CardTitle className="font-heading text-lg">Video Library</CardTitle>
-                    <CardDescription className="text-xs">{filteredShorts.length} videos in current filter</CardDescription>
+                    <CardDescription className="text-xs">
+                      {filteredShorts.length} videos in current filter · Live refresh {isWindowVisible ? 'on (4s)' : 'paused'}
+                    </CardDescription>
                   </div>
 
                   <div className="flex flex-col gap-2 sm:flex-row">

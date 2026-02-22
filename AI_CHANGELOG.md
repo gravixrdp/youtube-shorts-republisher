@@ -23,6 +23,17 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 12:26 UTC — Codex
+- Fixed Video Library live update behavior:
+  - Added tab-aware polling for fresh `shorts` + `stats` data when the page is visible.
+  - Poll cadence:
+    - `videos` tab: every 4s
+    - `dashboard` / `mappings` tabs: every 10s
+  - Polling auto-pauses when browser tab is hidden and resumes when visible.
+  - Added live status hint in Video Library header (`Live refresh on (4s)` / `paused`).
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+
 ### 2026-02-22 11:13 UTC — Codex
 - Fixed dashboard timeline preview so slots no longer repeat the same first title across morning/evening:
   - Mapping timeline now computes queue order as scheduler uses it:
