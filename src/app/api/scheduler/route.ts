@@ -3,6 +3,9 @@ import {
   getSchedulerState,
   updateSchedulerState,
   getPendingShorts,
+  getActiveChannelMappings,
+  claimOldestUnmappedPendingShortForMapping,
+  getNextGlobalPendingShort,
   updateShort,
   createLog,
   getConfig,
@@ -10,6 +13,7 @@ import {
   cleanupUploadedShortsForSingleDestination,
   getDueScheduledPublishShorts,
 } from '@/lib/supabase/database';
+import type { ShortsData } from '@/lib/supabase/client';
 import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo, updateVideoVisibility } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
@@ -60,6 +64,56 @@ function parseMappingId(raw: unknown): string | undefined {
 
 function nextRetryTime(minutes: number): string {
   return new Date(Date.now() + minutes * 60 * 1000).toISOString();
+}
+
+function collectMappingSourceValues(
+  mappings: Array<{ source_channel_id: string; source_channel_url: string }>
+): string[] {
+  return Array.from(
+    new Set(
+      mappings
+        .flatMap((mapping) => [mapping.source_channel_id?.trim(), mapping.source_channel_url?.trim()])
+        .filter((value): value is string => Boolean(value))
+    )
+  );
+}
+
+async function resolveNextPendingShort(mappingId?: string): Promise<ShortsData | null> {
+  if (mappingId) {
+    const mappedPending = await getPendingShorts(1, mappingId);
+    if (mappedPending.length > 0) {
+      return mappedPending[0];
+    }
+
+    const mapping = await getChannelMappingById(mappingId);
+    if (!mapping) {
+      return null;
+    }
+
+    const claimed = await claimOldestUnmappedPendingShortForMapping(
+      mapping.id,
+      mapping.source_channel_id,
+      mapping.source_channel_url,
+      mapping.target_channel_id
+    );
+
+    if (claimed) {
+      await createLog(
+        claimed.id,
+        'mapping',
+        'success',
+        `Claimed unmapped source short for mapping ${mapping.name}`
+      );
+    }
+
+    return claimed;
+  }
+
+  const activeMappings = await getActiveChannelMappings();
+  const excludedSourceValues = collectMappingSourceValues(activeMappings);
+  const globalPending = await getNextGlobalPendingShort(excludedSourceValues);
+
+  return globalPending;
 }
 
 async function publishDueScheduledShorts(limit: number = 20): Promise<{ checked: number; published: number; failed: number }> {
@@ -221,13 +275,15 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
       }
     }
 
-    // Get next pending video
-    const pending = await getPendingShorts(1, mappingId);
-    if (pending.length === 0) {
-      return { success: false, message: mappingId ? 'No pending videos for this destination slot' : 'No pending videos' };
+    const short = await resolveNextPendingShort(mappingId);
+    if (!short) {
+      return {
+        success: false,
+        message: mappingId
+          ? 'No pending videos for this mapping source queue'
+          : 'No pending videos in global queue',
+      };
     }
-
-    const short = pending[0];
 
     await createLog(short.id, 'process', 'success', 'Starting automated upload');
 

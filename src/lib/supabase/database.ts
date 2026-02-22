@@ -329,6 +329,89 @@ export async function getPendingShorts(limit: number = 10, mappingId?: string): 
   return data || [];
 }
 
+export async function claimOldestUnmappedPendingShortForMapping(
+  mappingId: string,
+  sourceChannelId?: string | null,
+  sourceChannelUrl?: string | null,
+  targetChannelId?: string | null
+): Promise<ShortsData | null> {
+  const sourceValues = Array.from(
+    new Set(
+      [sourceChannelId?.trim(), sourceChannelUrl?.trim()].filter(
+        (value): value is string => Boolean(value)
+      )
+    )
+  );
+
+  if (sourceValues.length === 0) {
+    return null;
+  }
+
+  const { data: candidates, error } = await supabaseAdmin
+    .from('shorts_data')
+    .select('*')
+    .eq('status', 'Pending')
+    .is('mapping_id', null)
+    .in('source_channel', sourceValues)
+    .order('created_at', { ascending: true })
+    .limit(20);
+
+  if (error || !candidates || candidates.length === 0) {
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    const { data: claimed, error: claimError } = await supabaseAdmin
+      .from('shorts_data')
+      .update({
+        mapping_id: mappingId,
+        target_channel: targetChannelId || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', candidate.id)
+      .eq('status', 'Pending')
+      .is('mapping_id', null)
+      .select('*')
+      .maybeSingle();
+
+    if (claimError) {
+      continue;
+    }
+
+    if (claimed) {
+      return claimed as ShortsData;
+    }
+  }
+
+  return null;
+}
+
+export async function getNextGlobalPendingShort(excludedSourceValues: string[] = []): Promise<ShortsData | null> {
+  const { data, error } = await supabaseAdmin
+    .from('shorts_data')
+    .select('*')
+    .eq('status', 'Pending')
+    .is('mapping_id', null)
+    .order('created_at', { ascending: true })
+    .limit(200);
+
+  if (error || !data || data.length === 0) {
+    return null;
+  }
+
+  const excluded = new Set(excludedSourceValues.map((value) => value.trim()).filter(Boolean));
+
+  for (const short of data) {
+    const sourceValue = short.source_channel?.trim();
+    if (sourceValue && excluded.has(sourceValue)) {
+      continue;
+    }
+    return short as ShortsData;
+  }
+
+  return null;
+}
+
 export async function getDueScheduledPublishShorts(limit: number = 20): Promise<ShortsData[]> {
   const nowIso = new Date().toISOString();
   const { data, error } = await supabaseAdmin

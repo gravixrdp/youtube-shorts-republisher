@@ -1239,43 +1239,106 @@ export default function GRAVIX() {
     }).format(new Date(clockNow));
   }, [clockNow]);
 
-  const pendingByMapping = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const short of shorts) {
-      if (short.status !== 'Pending' || !short.mapping_id) {
-        continue;
-      }
-      counts.set(short.mapping_id, (counts.get(short.mapping_id) || 0) + 1);
-    }
-    return counts;
-  }, [shorts]);
+  const activeMappings = useMemo(() => {
+    return channelMappings.filter((mapping) => mapping.is_active);
+  }, [channelMappings]);
 
-  const pendingGlobalQueue = useMemo(() => {
-    return shorts.filter((short) => short.status === 'Pending' && !short.mapping_id).length;
-  }, [shorts]);
-  const nextPendingTitleByMapping = useMemo(() => {
-    const sortedPending = shorts
-      .filter((short) => short.status === 'Pending' && !!short.mapping_id)
+  const sortedPendingShorts = useMemo(() => {
+    return shorts
+      .filter((short) => short.status === 'Pending')
       .slice()
       .sort((first, second) => new Date(first.created_at).getTime() - new Date(second.created_at).getTime());
+  }, [shorts]);
 
-    const map = new Map<string, string>();
-    for (const short of sortedPending) {
-      if (!short.mapping_id || map.has(short.mapping_id)) {
-        continue;
+  const mappingIdsBySourceValue = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const mapping of activeMappings) {
+      const sourceValues = Array.from(
+        new Set([mapping.source_channel_id?.trim(), mapping.source_channel_url?.trim()].filter((value): value is string => Boolean(value)))
+      );
+
+      for (const sourceValue of sourceValues) {
+        const existing = map.get(sourceValue);
+        if (existing) {
+          existing.push(mapping.id);
+        } else {
+          map.set(sourceValue, [mapping.id]);
+        }
       }
-      map.set(short.mapping_id, short.title);
     }
     return map;
-  }, [shorts]);
-  const nextGlobalPendingTitle = useMemo(() => {
-    const pendingGlobal = shorts
-      .filter((short) => short.status === 'Pending' && !short.mapping_id)
-      .slice()
-      .sort((first, second) => new Date(first.created_at).getTime() - new Date(second.created_at).getTime());
+  }, [activeMappings]);
 
-    return pendingGlobal[0]?.title || null;
-  }, [shorts]);
+  const activeMappingSourceValues = useMemo(() => {
+    return new Set(mappingIdsBySourceValue.keys());
+  }, [mappingIdsBySourceValue]);
+
+  const mappingQueueSummaryById = useMemo(() => {
+    const summary = new Map<string, { pendingCount: number; nextVideoTitle: string | null }>();
+
+    for (const mapping of activeMappings) {
+      summary.set(mapping.id, { pendingCount: 0, nextVideoTitle: null });
+    }
+
+    for (const short of sortedPendingShorts) {
+      if (short.mapping_id) {
+        const entry = summary.get(short.mapping_id);
+        if (!entry) {
+          continue;
+        }
+        entry.pendingCount += 1;
+        if (!entry.nextVideoTitle) {
+          entry.nextVideoTitle = short.title;
+        }
+        continue;
+      }
+
+      const sourceValue = short.source_channel?.trim();
+      if (!sourceValue) {
+        continue;
+      }
+
+      const mappingIds = mappingIdsBySourceValue.get(sourceValue);
+      if (!mappingIds || mappingIds.length === 0) {
+        continue;
+      }
+
+      for (const mappingId of mappingIds) {
+        const entry = summary.get(mappingId);
+        if (!entry) {
+          continue;
+        }
+        entry.pendingCount += 1;
+        if (!entry.nextVideoTitle) {
+          entry.nextVideoTitle = short.title;
+        }
+      }
+    }
+
+    return summary;
+  }, [activeMappings, mappingIdsBySourceValue, sortedPendingShorts]);
+
+  const globalQueueSummary = useMemo(() => {
+    const summary = { pendingCount: 0, nextVideoTitle: null as string | null };
+
+    for (const short of sortedPendingShorts) {
+      if (short.mapping_id) {
+        continue;
+      }
+
+      const sourceValue = short.source_channel?.trim();
+      if (sourceValue && activeMappingSourceValues.has(sourceValue)) {
+        continue;
+      }
+
+      summary.pendingCount += 1;
+      if (!summary.nextVideoTitle) {
+        summary.nextVideoTitle = short.title;
+      }
+    }
+
+    return summary;
+  }, [activeMappingSourceValues, sortedPendingShorts]);
 
   const destinationMappingCount = useMemo(() => {
     const map = new Map<string, number>();
@@ -1300,7 +1363,6 @@ export default function GRAVIX() {
 
   const upcomingUploadSlots = useMemo(() => {
     const now = new Date(currentMinuteKey * 60 * 1000);
-    const activeMappings = channelMappings.filter((mapping) => mapping.is_active);
     const fallbackMorning = normalizeTimeValue(config.upload_time_morning, '09:00');
     const fallbackEvening = normalizeTimeValue(config.upload_time_evening, '18:00');
     const slots: UpcomingUploadSlot[] = [];
@@ -1308,7 +1370,7 @@ export default function GRAVIX() {
     for (const mapping of activeMappings) {
       const morningSlot = normalizeTimeValue(mapping.upload_time_morning, fallbackMorning);
       const eveningSlot = normalizeTimeValue(mapping.upload_time_evening, fallbackEvening);
-      const mappingPending = pendingByMapping.get(mapping.id) || 0;
+      const mappingQueue = mappingQueueSummaryById.get(mapping.id) || { pendingCount: 0, nextVideoTitle: null };
       const slotDefinitions = [
         { label: 'Morning', time: morningSlot },
         { label: 'Evening', time: eveningSlot },
@@ -1335,8 +1397,8 @@ export default function GRAVIX() {
           slotLabel: slot.label,
           slotTime: slot.time,
           scheduledAt: nextOccurrence.getTime(),
-          pendingCount: mappingPending,
-          nextVideoTitle: nextPendingTitleByMapping.get(mapping.id) || null,
+          pendingCount: mappingQueue.pendingCount,
+          nextVideoTitle: mappingQueue.nextVideoTitle,
         });
       }
     }
@@ -1366,21 +1428,19 @@ export default function GRAVIX() {
         slotLabel: slot.label,
         slotTime: slot.time,
         scheduledAt: nextOccurrence.getTime(),
-        pendingCount: pendingGlobalQueue,
-        nextVideoTitle: nextGlobalPendingTitle,
+        pendingCount: globalQueueSummary.pendingCount,
+        nextVideoTitle: globalQueueSummary.nextVideoTitle,
       });
     }
 
     return slots.sort((first, second) => first.scheduledAt - second.scheduledAt).slice(0, 8);
   }, [
-    channelMappings,
+    activeMappings,
     currentMinuteKey,
     config.upload_time_evening,
     config.upload_time_morning,
-    pendingByMapping,
-    pendingGlobalQueue,
-    nextGlobalPendingTitle,
-    nextPendingTitleByMapping,
+    globalQueueSummary,
+    mappingQueueSummaryById,
     schedulerTimezone,
   ]);
 

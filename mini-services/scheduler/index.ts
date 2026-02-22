@@ -232,15 +232,12 @@ async function checkConfiguredTimeSlots() {
       continue;
     }
 
-    const uploadsPerDay = Number.parseInt(String(mapping.uploads_per_day ?? '2'), 10);
-    const normalizedUploadsPerDay = Number.isFinite(uploadsPerDay) && uploadsPerDay > 0 ? uploadsPerDay : 2;
-
     const mappingMorning = normalizeTimeValue(mapping.upload_time_morning, globalMorningTime);
     const mappingEvening = normalizeTimeValue(mapping.upload_time_evening, globalEveningTime);
 
     const slotCandidates: Array<{ label: string; time: string }> = [{ label: 'morning', time: mappingMorning }];
 
-    if (normalizedUploadsPerDay > 1 && mappingEvening !== mappingMorning) {
+    if (mappingEvening !== mappingMorning) {
       slotCandidates.push({ label: 'evening', time: mappingEvening });
     }
 

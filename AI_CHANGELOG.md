@@ -23,6 +23,27 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-22 10:50 UTC — Codex
+- Fixed mapping-vs-global queue routing so mapping slots no longer appear empty when source-matching pending videos are still unmapped:
+  - Mapping run now resolves pending in this order:
+    1) already-mapped pending (`mapping_id`)
+    2) oldest unmapped pending from that mapping’s source (`source_channel_id` / `source_channel_url`), then atomically claims it to mapping.
+  - Global run now excludes pending source videos that belong to any active mapping source.
+  - Files:
+    - `src/app/api/scheduler/route.ts`
+    - `src/lib/supabase/database.ts`
+- Fixed scheduler slot behavior so mapping morning + evening slots are both considered whenever times differ (not blocked by `uploads_per_day`).
+  - File:
+    - `mini-services/scheduler/index.ts`
+- Fixed admin `Next Upload Timeline` queue math to match backend scheduling behavior:
+  - Mapping pending count/title now includes source-matching unmapped pending (plus mapped pending).
+  - Global queue now excludes unmapped pending that belongs to active mapping sources.
+  - File:
+    - `src/app/admin/(panel)/page.tsx`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+
 ### 2026-02-22 10:35 UTC — Codex
 - Added live top-header scheduler clock in admin panel:
   - Shows current time with seconds for configured `scheduler_timezone`.
