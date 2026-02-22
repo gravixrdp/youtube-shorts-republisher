@@ -3,11 +3,49 @@ import {
   getShortById, 
   updateShort, 
   createLog,
-  getConfig 
+  getConfig,
+  getChannelMappingById,
+  cleanupUploadedShortsForSingleDestination
 } from '@/lib/supabase/database';
 import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo, getVideoStatus } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
+import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
+
+async function resolveDestinationRefreshToken(mappingId: string | null): Promise<{ refreshToken?: string; error?: string }> {
+  if (!mappingId) {
+    return {};
+  }
+
+  const mapping = await getChannelMappingById(mappingId);
+  if (!mapping || !mapping.target_channel_id) {
+    return {};
+  }
+
+  const refreshToken = await getRefreshTokenForDestinationChannel(mapping.target_channel_id);
+  if (!refreshToken) {
+    return {
+      error: `Destination channel ${mapping.target_channel_id} is not connected. Connect it from mapping screen.`,
+    };
+  }
+
+  return { refreshToken };
+}
+
+async function runUploadedCleanup() {
+  const cleanupHours = parseInt((await getConfig('uploaded_cleanup_hours')) || '5', 10);
+  return cleanupUploadedShortsForSingleDestination({
+    olderThanHours: Number.isNaN(cleanupHours) ? 5 : cleanupHours,
+  });
+}
+
+function buildUploadTags(existingTags: string[] | null, hashtags: string[]): string[] {
+  const tags = [...(existingTags || []), ...hashtags]
+    .map((value) => value.replace(/^#/, '').replace(/[^a-zA-Z0-9_]/g, '').trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(tags)).slice(0, 20);
+}
 
 // POST - Download or Upload video
 export async function POST(request: NextRequest) {
@@ -115,14 +153,27 @@ export async function POST(request: NextRequest) {
       if (hashtags.length > 0) {
         description = `${description}\n\n${hashtags.join(' ')}`;
       }
+
+      const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
+      if (destinationAuth.error) {
+        await updateShort(shortId, {
+          status: 'Failed',
+          error_log: destinationAuth.error
+        });
+        await createLog(shortId, 'upload', 'error', destinationAuth.error);
+        return NextResponse.json({ success: false, error: destinationAuth.error }, { status: 400 });
+      }
       
       // Upload to YouTube
       const result = await uploadVideo(
         filePath,
         title,
         description,
-        short.tags || [],
-        visibility as 'public' | 'unlisted' | 'private'
+        buildUploadTags(short.tags || [], hashtags),
+        visibility as 'public' | 'unlisted' | 'private',
+        {
+          refreshToken: destinationAuth.refreshToken
+        }
       );
       
       if (!result.success) {
@@ -140,6 +191,8 @@ export async function POST(request: NextRequest) {
         uploaded_date: new Date().toISOString(),
         target_video_id: result.videoId
       });
+
+      await runUploadedCleanup();
       
       await deleteVideo(filePath);
       await createLog(shortId, 'upload', 'success', `Uploaded as ${result.videoId}`);
@@ -153,6 +206,8 @@ export async function POST(request: NextRequest) {
     
     // Process complete workflow (download + upload)
     if (action === 'process') {
+      await createLog(shortId, 'process', 'success', 'Starting process workflow');
+
       // Download
       const downloadResult = await downloadVideo(short.video_url, short.video_id);
       if (!downloadResult.success) {
@@ -160,6 +215,7 @@ export async function POST(request: NextRequest) {
           status: 'Failed', 
           error_log: downloadResult.error 
         });
+        await createLog(shortId, 'download', 'error', downloadResult.error || 'Download failed');
         return NextResponse.json({ success: false, error: downloadResult.error });
       }
       
@@ -171,12 +227,17 @@ export async function POST(request: NextRequest) {
           status: 'Failed', 
           error_log: validation.error 
         });
+        await createLog(shortId, 'validation', 'error', validation.error || 'Validation failed');
         return NextResponse.json({ success: false, error: validation.error });
       }
+
+      await updateShort(shortId, { status: 'Downloaded' });
+      await createLog(shortId, 'download', 'success', `Downloaded to ${downloadResult.filePath}`);
       
       // Upload
       const visibility = await getConfig('default_visibility') || 'public';
       const aiEnabled = await getConfig('ai_enhancement_enabled') === 'true';
+      await updateShort(shortId, { status: 'Uploading' });
       
       let title = short.title;
       let description = short.description || '';
@@ -196,13 +257,26 @@ export async function POST(request: NextRequest) {
       if (hashtags.length > 0) {
         description = `${description}\n\n${hashtags.join(' ')}`;
       }
+
+      const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
+      if (destinationAuth.error) {
+        await updateShort(shortId, {
+          status: 'Failed',
+          error_log: destinationAuth.error
+        });
+        await createLog(shortId, 'upload', 'error', destinationAuth.error);
+        return NextResponse.json({ success: false, error: destinationAuth.error }, { status: 400 });
+      }
       
       const uploadResult = await uploadVideo(
         downloadResult.filePath!,
         title,
         description,
-        short.tags || [],
-        visibility as 'public' | 'unlisted' | 'private'
+        buildUploadTags(short.tags || [], hashtags),
+        visibility as 'public' | 'unlisted' | 'private',
+        {
+          refreshToken: destinationAuth.refreshToken
+        }
       );
       
       // Clean up
@@ -213,6 +287,7 @@ export async function POST(request: NextRequest) {
           status: 'Failed', 
           error_log: uploadResult.error 
         });
+        await createLog(shortId, 'upload', 'error', uploadResult.error || 'Upload failed');
         return NextResponse.json({ success: false, error: uploadResult.error });
       }
       
@@ -223,6 +298,9 @@ export async function POST(request: NextRequest) {
         ai_title: title !== short.title ? title : null,
         ai_description: description !== short.description ? description : null
       });
+
+      await runUploadedCleanup();
+      await createLog(shortId, 'process', 'success', `Uploaded as ${uploadResult.videoId}`);
       
       return NextResponse.json({ 
         success: true, 

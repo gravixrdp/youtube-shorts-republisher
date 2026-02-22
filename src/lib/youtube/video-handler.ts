@@ -1,11 +1,68 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
 
 const execAsync = promisify(exec);
 
-const TEMP_DIR = path.join(process.cwd(), 'temp');
+const TEMP_DIR = process.env.TEMP_VIDEO_DIR || path.join('/tmp', 'youtube-shorts-republisher');
+const DOWNLOAD_TIMEOUT_MS = 300000;
+const COMMAND_BUFFER_SIZE = 1024 * 1024 * 12;
+const YT_DLP_BIN = process.env.YT_DLP_BIN || (process.env.HOME ? path.join(process.env.HOME, '.local', 'bin', 'yt-dlp') : 'yt-dlp');
+
+interface ExecFailure extends Error {
+  stderr?: string;
+  stdout?: string;
+}
+
+function compactMultiline(value: string, maxLength: number = 1500): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, maxLength)}...`;
+}
+
+function formatExecError(error: unknown, fallback: string): string {
+  if (!error || typeof error !== 'object') {
+    return fallback;
+  }
+
+  const execError = error as ExecFailure;
+  const stderr = typeof execError.stderr === 'string' ? execError.stderr : '';
+  const stdout = typeof execError.stdout === 'string' ? execError.stdout : '';
+  const message = typeof execError.message === 'string' ? execError.message : fallback;
+
+  const details = stderr || stdout;
+  if (!details) {
+    return compactMultiline(message);
+  }
+
+  return compactMultiline(`${message}\n${details}`);
+}
+
+async function runShellCommand(command: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    await execAsync(command, {
+      timeout: DOWNLOAD_TIMEOUT_MS,
+      maxBuffer: COMMAND_BUFFER_SIZE,
+    });
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: formatExecError(error, 'Command execution failed'),
+    };
+  }
+}
+
+function resolveYtDlpBinary(): string {
+  if (YT_DLP_BIN.includes('/') && fsSync.existsSync(YT_DLP_BIN)) {
+    return YT_DLP_BIN;
+  }
+  return 'yt-dlp';
+}
 
 // Ensure temp directory exists
 async function ensureTempDir() {
@@ -37,15 +94,28 @@ export async function downloadVideo(
     } catch {
       // File doesn't exist, proceed with download
     }
+
+    await fs.rm(outputPath, { force: true });
     
-    // Download with yt-dlp
-    // Using format for best quality vertical video under 100MB
-    const command = `yt-dlp -f "best[height<=1080][ext=mp4][filesize<100M]/best[height<=720][ext=mp4]" -o "${outputPath}" --no-playlist "${videoUrl}"`;
-    
-    const { stdout, stderr } = await execAsync(command, {
-      timeout: 300000, // 5 minutes timeout
-      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
-    });
+    // Primary strategy: high-quality MP4 with Android/Web clients.
+    const ytDlpBin = resolveYtDlpBinary();
+    const primaryCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android,web" -f "bv*[ext=mp4][height<=2160]+ba[ext=m4a]/b[ext=mp4][height<=2160]/b" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
+    const primaryResult = await runShellCommand(primaryCommand);
+
+    if (!primaryResult.success) {
+      // Fallback strategy: less strict format to reduce 403/nsig failures.
+      const fallbackCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android" -f "best[ext=mp4][height<=1080]/best[height<=1080]/best" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
+      const fallbackResult = await runShellCommand(fallbackCommand);
+
+      if (!fallbackResult.success) {
+        return {
+          success: false,
+          error: compactMultiline(
+            `Download failed (primary + fallback). Primary: ${primaryResult.error || 'Unknown error'} | Fallback: ${fallbackResult.error || 'Unknown error'}`,
+          ),
+        };
+      }
+    }
     
     // Verify file exists
     try {

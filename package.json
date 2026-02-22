@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
+    "start": "NODE_ENV=production HOSTNAME=${BIND_HOST:-0.0.0.0} PORT=${PORT:-3000} bun .next/standalone/server.js",
+    "start:log": "NODE_ENV=production HOSTNAME=${BIND_HOST:-0.0.0.0} PORT=${PORT:-3000} bun .next/standalone/server.js 2>&1 | tee server.log",
+    "scheduler:start": "bun run --cwd mini-services/scheduler start",
     "lint": "eslint .",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",

@@ -7,9 +7,27 @@ import {
   deleteShort,
   createLog,
   getChannelMappings,
-  updateLastFetched
+  updateLastFetched,
+  getChannelMappingById
 } from '@/lib/supabase/database';
 import { fetchShortsFromChannel } from '@/lib/youtube/scraper';
+import { getSourceChannels } from '@/lib/youtube/source-channels';
+
+async function createScrapeRunLog(
+  status: 'success' | 'error',
+  message: string,
+  details?: {
+    source_channel_id?: string;
+    source_channel_url?: string;
+    mapping_id?: string;
+    total?: number;
+    added?: number;
+    duplicates?: number;
+    errors?: number;
+  }
+) {
+  await createLog(null, 'scrape', status, message, details);
+}
 
 // GET - Fetch all shorts
 export async function GET(request: NextRequest) {
@@ -42,6 +60,182 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { action, channelUrl, mappingId, ...data } = body;
+
+    const persistShort = async (payload: Parameters<typeof createShort>[0]) => {
+      const created = await createShort(payload);
+      if (created) {
+        await createLog(created.id, 'fetch', 'success', 'Fetched from source channel');
+        return 'added' as const;
+      }
+
+      // If insert failed but video exists now, treat as duplicate (safe on restart/re-scrape).
+      const existing = payload.video_id ? await getShortByVideoId(payload.video_id) : null;
+      if (existing) {
+        return 'duplicate' as const;
+      }
+
+      return 'error' as const;
+    };
+
+    // Fetch shorts for one source channel (manual scraping without mapping)
+    if (action === 'fetch-source') {
+      const sourceChannelId = typeof body.sourceChannelId === 'string' ? body.sourceChannelId : '';
+      const sourceChannelUrl = typeof body.sourceChannelUrl === 'string' ? body.sourceChannelUrl : '';
+
+      if (!sourceChannelId || !sourceChannelUrl) {
+        return NextResponse.json(
+          { success: false, error: 'sourceChannelId and sourceChannelUrl are required' },
+          { status: 400 }
+        );
+      }
+
+      const sources = await getSourceChannels();
+      const source = sources.find((item) => item.channel_id === sourceChannelId);
+
+      if (!source) {
+        return NextResponse.json(
+          { success: false, error: 'Source channel not found' },
+          { status: 404 }
+        );
+      }
+
+      if (!source.is_active) {
+        return NextResponse.json(
+          { success: false, error: 'Scraping is stopped for this source channel. Start scraping first.' },
+          { status: 400 }
+        );
+      }
+
+      const result = await fetchShortsFromChannel(sourceChannelUrl, 500);
+
+      if (!result.success) {
+        await createScrapeRunLog('error', result.error || 'Scraping failed for source', {
+          source_channel_id: sourceChannelId,
+          source_channel_url: sourceChannelUrl,
+        });
+
+        return NextResponse.json(
+          { success: false, error: result.error || 'Failed to scrape source channel' },
+          { status: 400 }
+        );
+      }
+
+      let added = 0;
+      let duplicates = 0;
+      let errors = 0;
+
+      for (const short of result.shorts) {
+        const outcome = await persistShort({
+          video_id: short.videoId,
+          video_url: short.videoUrl,
+          title: short.title,
+          description: short.description,
+          tags: short.tags,
+          thumbnail_url: short.thumbnailUrl,
+          duration: short.duration,
+          published_date: short.publishedDate,
+          status: 'Pending',
+          mapping_id: null,
+          source_channel: sourceChannelId,
+          target_channel: null,
+        });
+
+        if (outcome === 'added') added++;
+        else if (outcome === 'duplicate') duplicates++;
+        else errors++;
+      }
+
+      await createScrapeRunLog('success', `Scrape completed for source ${source.channel_title}`, {
+        source_channel_id: sourceChannelId,
+        source_channel_url: sourceChannelUrl,
+        total: result.shorts.length,
+        added,
+        duplicates,
+        errors,
+      });
+
+      return NextResponse.json({
+        success: true,
+        message: 'Scraping completed. Source shorts metadata synced to database.',
+        stats: { total: result.shorts.length, added, duplicates, errors },
+      });
+    }
+
+    // Fetch shorts from all active sources (manual bulk scraping)
+    if (action === 'fetch-all-sources') {
+      const sources = (await getSourceChannels()).filter((source) => source.is_active);
+
+      let totalAdded = 0;
+      let totalDuplicates = 0;
+      let totalErrors = 0;
+      let totalFetched = 0;
+
+      for (const source of sources) {
+        const result = await fetchShortsFromChannel(source.channel_url, 500);
+
+        if (!result.success) {
+          await createScrapeRunLog('error', result.error || 'Scraping failed for source', {
+            source_channel_id: source.channel_id,
+            source_channel_url: source.channel_url,
+          });
+          continue;
+        }
+
+        let sourceAdded = 0;
+        let sourceDuplicates = 0;
+        let sourceErrors = 0;
+        totalFetched += result.shorts.length;
+
+        for (const short of result.shorts) {
+          const outcome = await persistShort({
+            video_id: short.videoId,
+            video_url: short.videoUrl,
+            title: short.title,
+            description: short.description,
+            tags: short.tags,
+            thumbnail_url: short.thumbnailUrl,
+            duration: short.duration,
+            published_date: short.publishedDate,
+            status: 'Pending',
+            mapping_id: null,
+            source_channel: source.channel_id,
+            target_channel: null,
+          });
+
+          if (outcome === 'added') {
+            sourceAdded++;
+            totalAdded++;
+          } else if (outcome === 'duplicate') {
+            sourceDuplicates++;
+            totalDuplicates++;
+          } else {
+            sourceErrors++;
+            totalErrors++;
+          }
+        }
+
+        await createScrapeRunLog('success', `Scrape completed for source ${source.channel_title}`, {
+          source_channel_id: source.channel_id,
+          source_channel_url: source.channel_url,
+          total: result.shorts.length,
+          added: sourceAdded,
+          duplicates: sourceDuplicates,
+          errors: sourceErrors,
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Scraping completed for all active source channels.',
+        stats: {
+          sources: sources.length,
+          total: totalFetched,
+          added: totalAdded,
+          duplicates: totalDuplicates,
+          errors: totalErrors,
+        },
+      });
+    }
     
     // Fetch shorts from specific channel (with mapping)
     if (action === 'fetch') {
@@ -51,10 +245,35 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         );
       }
+
+      const mapping = mappingId ? await getChannelMappingById(mappingId) : null;
+      if (mappingId && !mapping) {
+        return NextResponse.json(
+          { success: false, error: 'Mapping not found' },
+          { status: 404 }
+        );
+      }
+
+      if (mapping?.source_channel_id) {
+        const sources = await getSourceChannels();
+        const source = sources.find((item) => item.channel_id === mapping.source_channel_id);
+        if (source && !source.is_active) {
+          return NextResponse.json(
+            { success: false, error: 'Scraping is stopped for this source channel. Start scraping first.' },
+            { status: 400 }
+          );
+        }
+      }
       
-      const result = await fetchShortsFromChannel(channelUrl);
+      const result = await fetchShortsFromChannel(channelUrl, 500);
       
       if (!result.success) {
+        await createScrapeRunLog('error', result.error || 'Scraping failed for mapped source', {
+          source_channel_id: mapping?.source_channel_id,
+          source_channel_url: mapping?.source_channel_url || channelUrl,
+          mapping_id: mappingId || undefined,
+        });
+
         return NextResponse.json(
           { success: false, error: result.error },
           { status: 400 }
@@ -74,8 +293,7 @@ export async function POST(request: NextRequest) {
           continue;
         }
         
-        // Create new entry
-        const created = await createShort({
+        const outcome = await persistShort({
           video_id: short.videoId,
           video_url: short.videoUrl,
           title: short.title,
@@ -86,25 +304,33 @@ export async function POST(request: NextRequest) {
           published_date: short.publishedDate,
           status: 'Pending',
           mapping_id: mappingId || null,
-          source_channel: channelUrl
+          source_channel: mapping?.source_channel_id || channelUrl,
+          target_channel: mapping?.target_channel_id || null
         });
         
-        if (created) {
-          added++;
-          await createLog(created.id, 'fetch', 'success', 'Fetched from source channel');
-        } else {
-          errors++;
-        }
+        if (outcome === 'added') added++;
+        else if (outcome === 'duplicate') duplicates++;
+        else errors++;
       }
       
       // Update last fetched time for mapping
       if (mappingId) {
         await updateLastFetched(mappingId);
       }
+
+      await createScrapeRunLog('success', 'Scrape completed for mapped source', {
+        source_channel_id: mapping?.source_channel_id,
+        source_channel_url: mapping?.source_channel_url || channelUrl,
+        mapping_id: mappingId || undefined,
+        total: result.shorts.length,
+        added,
+        duplicates,
+        errors,
+      });
       
       return NextResponse.json({
         success: true,
-        message: `Fetched ${result.shorts.length} shorts. Added: ${added}, Duplicates: ${duplicates}, Errors: ${errors}`,
+        message: 'Scraping completed. Source shorts metadata synced to database.',
         stats: { total: result.shorts.length, added, duplicates, errors }
       });
     }
@@ -112,25 +338,48 @@ export async function POST(request: NextRequest) {
     // Fetch from all active mappings
     if (action === 'fetch-all') {
       const mappings = await getChannelMappings();
-      const activeMappings = mappings.filter(m => m.is_active);
+      const sourceChannels = await getSourceChannels();
+      const sourceById = new Map(sourceChannels.map((source) => [source.channel_id, source]));
+      const sourceByUrl = new Map(sourceChannels.map((source) => [source.channel_url, source]));
+
+      const activeMappings = mappings.filter((mapping) => {
+        if (!mapping.is_active) {
+          return false;
+        }
+
+        const source = sourceById.get(mapping.source_channel_id) || sourceByUrl.get(mapping.source_channel_url);
+        return source ? source.is_active : true;
+      });
       
       let totalAdded = 0;
       let totalDuplicates = 0;
       let totalErrors = 0;
       
       for (const mapping of activeMappings) {
-        const result = await fetchShortsFromChannel(mapping.source_channel_url);
+        const result = await fetchShortsFromChannel(mapping.source_channel_url, 500);
         
-        if (!result.success) continue;
+        if (!result.success) {
+          await createScrapeRunLog('error', result.error || 'Scraping failed for mapping source', {
+            source_channel_id: mapping.source_channel_id,
+            source_channel_url: mapping.source_channel_url,
+            mapping_id: mapping.id,
+          });
+          continue;
+        }
+
+        let mappingAdded = 0;
+        let mappingDuplicates = 0;
+        let mappingErrors = 0;
         
         for (const short of result.shorts) {
           const existing = await getShortByVideoId(short.videoId);
           if (existing) {
             totalDuplicates++;
+            mappingDuplicates++;
             continue;
           }
           
-          const created = await createShort({
+          const outcome = await persistShort({
             video_id: short.videoId,
             video_url: short.videoUrl,
             title: short.title,
@@ -141,23 +390,38 @@ export async function POST(request: NextRequest) {
             published_date: short.publishedDate,
             status: 'Pending',
             mapping_id: mapping.id,
-            source_channel: mapping.source_channel_url,
+            source_channel: mapping.source_channel_id || mapping.source_channel_url,
             target_channel: mapping.target_channel_id
           });
           
-          if (created) {
+          if (outcome === 'added') {
             totalAdded++;
+            mappingAdded++;
+          } else if (outcome === 'duplicate') {
+            totalDuplicates++;
+            mappingDuplicates++;
           } else {
             totalErrors++;
+            mappingErrors++;
           }
         }
         
         await updateLastFetched(mapping.id);
+
+        await createScrapeRunLog('success', `Scrape completed for mapping ${mapping.name}`, {
+          source_channel_id: mapping.source_channel_id,
+          source_channel_url: mapping.source_channel_url,
+          mapping_id: mapping.id,
+          total: result.shorts.length,
+          added: mappingAdded,
+          duplicates: mappingDuplicates,
+          errors: mappingErrors,
+        });
       }
       
       return NextResponse.json({
         success: true,
-        message: `Fetched from ${activeMappings.length} channels. Added: ${totalAdded}, Duplicates: ${totalDuplicates}, Errors: ${totalErrors}`,
+        message: 'Scraping completed for all active source mappings.',
         stats: { channels: activeMappings.length, total: totalAdded + totalDuplicates + totalErrors, added: totalAdded, duplicates: totalDuplicates, errors: totalErrors }
       });
     }

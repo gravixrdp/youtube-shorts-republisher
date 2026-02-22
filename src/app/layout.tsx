@@ -1,8 +1,14 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { DM_Sans, Inter } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "@/components/theme-provider";
+
+const dmSans = DM_Sans({
+  variable: "--font-dm-sans",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
 
 const inter = Inter({
   variable: "--font-inter",
@@ -10,22 +16,23 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "YouTube Shorts Republisher | Automated Video Management",
-  description: "Automated YouTube Shorts reposting tool with Supabase backend. Schedule, manage, and auto-upload shorts with AI enhancement.",
-  keywords: ["YouTube Shorts", "Automation", "Video Uploader", "Supabase", "Content Republishing", "AI Enhancement"],
-  authors: [{ name: "YouTube Shorts Republisher" }],
+  title: "GRAVIX — YouTube Shorts Automation",
+  description:
+    "Automate YouTube Shorts republishing with smart mapping, scheduling controls, and AI-assisted enhancements.",
+  keywords: ["YouTube Shorts", "Automation", "Video Uploader", "Content Republishing", "AI Enhancement"],
+  authors: [{ name: "GRAVIX" }],
   icons: {
     icon: "/logo.svg",
   },
   openGraph: {
-    title: "YouTube Shorts Republisher",
-    description: "Automated YouTube Shorts reposting tool with AI enhancement",
+    title: "GRAVIX — YouTube Shorts Automation",
+    description: "Automate YouTube Shorts republishing with smart channel mapping and scheduling",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "YouTube Shorts Republisher",
-    description: "Automated YouTube Shorts reposting tool with AI enhancement",
+    title: "GRAVIX — YouTube Shorts Automation",
+    description: "Automate YouTube Shorts republishing with smart channel mapping and scheduling",
   },
 };
 
@@ -35,13 +42,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="dark" suppressHydrationWarning>
       <body
-        className={`${inter.variable} font-sans antialiased bg-background text-foreground`}
+        className={`${dmSans.variable} ${inter.variable} font-body bg-background text-foreground antialiased`}
       >
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
+          defaultTheme="dark"
           enableSystem
           disableTransitionOnChange={false}
         >

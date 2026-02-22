@@ -1,5 +1,15 @@
 import { getConfig } from '../supabase/database';
 
+function readEnv(...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
 // YouTube API Types
 interface YouTubeVideo {
   id: string;
@@ -124,7 +134,7 @@ export async function fetchChannelVideos(
   error?: string;
 }> {
   try {
-    const apiKey = await getConfig('youtube_api_key');
+    const apiKey = (await getConfig('youtube_api_key')) || readEnv('YT_API_KEY', 'YOUTUBE_API_KEY');
     if (!apiKey) {
       return { success: false, videos: [], error: 'YouTube API key not configured' };
     }
@@ -196,7 +206,7 @@ export async function fetchChannelVideos(
 // Filter and process shorts from videos
 export async function fetchShortsFromChannel(
   channelUrlOrId: string,
-  maxResults: number = 50
+  maxResults: number = 500
 ): Promise<{
   success: boolean;
   shorts: Array<{

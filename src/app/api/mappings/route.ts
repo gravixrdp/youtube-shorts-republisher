@@ -4,7 +4,8 @@ import {
   getActiveChannelMappings,
   createChannelMapping, 
   updateChannelMapping, 
-  deleteChannelMapping
+  deleteChannelMapping,
+  linkUnmappedSourceShortsToMapping
 } from '@/lib/supabase/database';
 
 // GET - Fetch all channel mappings
@@ -45,9 +46,9 @@ export async function POST(request: NextRequest) {
       ai_enhancement_enabled
     } = body;
     
-    if (!name || !source_channel_url || !target_channel_id) {
+    if (!name || !source_channel_id || !source_channel_url || !target_channel_id) {
       return NextResponse.json(
-        { success: false, error: 'Name, source channel URL, and target channel ID are required' },
+        { success: false, error: 'Name, source channel, source channel URL, and target channel are required' },
         { status: 400 }
       );
     }
@@ -68,7 +69,14 @@ export async function POST(request: NextRequest) {
     });
     
     if (mapping) {
-      return NextResponse.json({ success: true, mapping });
+      const linkedShorts = await linkUnmappedSourceShortsToMapping(
+        mapping.id,
+        source_channel_id,
+        source_channel_url,
+        target_channel_id
+      );
+
+      return NextResponse.json({ success: true, mapping, linked_shorts: linkedShorts });
     }
     
     return NextResponse.json(
@@ -113,6 +121,7 @@ export async function DELETE(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const id = searchParams.get('id');
+    const cleanupMappedShorts = searchParams.get('cleanupMappedShorts') !== 'false';
     
     if (!id) {
       return NextResponse.json(
@@ -121,8 +130,8 @@ export async function DELETE(request: NextRequest) {
       );
     }
     
-    const success = await deleteChannelMapping(id);
-    return NextResponse.json({ success });
+    const success = await deleteChannelMapping(id, { removeMappedShorts: cleanupMappedShorts });
+    return NextResponse.json({ success, cleanupMappedShorts });
   } catch (error) {
     console.error('Mappings DELETE error:', error);
     return NextResponse.json(

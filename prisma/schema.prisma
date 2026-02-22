@@ -13,68 +13,136 @@ datasource db {
 
 // Configuration storage - key-value pairs for app settings
 model Config {
-  id        String   @id @default(cuid())
+  id        String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
   key       String   @unique
-  value     String   @db.Text
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  value     String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
 
   @@map("config")
 }
 
+// Channel Mappings (source -> destination)
+model ChannelMapping {
+  id                    String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  name                  String
+  sourceChannelId       String    @map("source_channel_id")
+  sourceChannelUrl      String    @map("source_channel_url")
+  sourceChannelName     String?   @map("source_channel_name")
+  targetChannelId       String    @map("target_channel_id")
+  targetChannelName     String?   @map("target_channel_name")
+  isActive              Boolean   @default(true) @map("is_active")
+  uploadsPerDay         Int       @default(2) @map("uploads_per_day")
+  uploadTimeMorning     String?   @default("09:00") @map("upload_time_morning")
+  uploadTimeEvening     String?   @default("18:00") @map("upload_time_evening")
+  defaultVisibility     String?   @default("public") @map("default_visibility")
+  aiEnhancementEnabled  Boolean   @default(false) @map("ai_enhancement_enabled")
+  lastFetchedAt         DateTime? @map("last_fetched_at")
+  totalFetched          Int       @default(0) @map("total_fetched")
+  totalUploaded         Int       @default(0) @map("total_uploaded")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @default(now()) @map("updated_at")
+
+  shorts ShortsData[]
+
+  @@index([isActive])
+  @@index([sourceChannelId])
+  @@index([targetChannelId])
+  @@index([isActive, sourceChannelId])
+  @@index([isActive, sourceChannelUrl])
+  @@map("channel_mappings")
+}
+
+model SourceChannel {
+  channelId   String   @id @map("channel_id")
+  channelTitle String  @map("channel_title")
+  channelUrl  String   @unique @map("channel_url")
+  isActive    Boolean  @default(true) @map("is_active")
+  connectedAt DateTime @default(now()) @map("connected_at")
+  updatedAt   DateTime @default(now()) @map("updated_at")
+
+  @@index([isActive])
+  @@map("source_channels")
+}
+
+model DestinationChannel {
+  channelId    String   @id @map("channel_id")
+  channelTitle String   @map("channel_title")
+  refreshToken String   @map("refresh_token")
+  connectedAt  DateTime @default(now()) @map("connected_at")
+  updatedAt    DateTime @default(now()) @map("updated_at")
+
+  @@index([connectedAt])
+  @@map("destination_channels")
+}
+
 // YouTube Shorts data storage
 model ShortsData {
-  id              String    @id @default(cuid())
-  videoId         String    @unique // YouTube Video ID (prevents duplicates)
-  videoUrl        String
+  id              String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  videoId         String    @unique @map("video_id")
+  videoUrl        String    @map("video_url")
   title           String
   description     String?   @db.Text
-  tags            String?   @db.Text // JSON array of tags
-  thumbnailUrl    String?
-  duration        Int       // Duration in seconds
-  publishedDate   DateTime? // Original publish date
-  status          String    @default("Pending") // Pending, Downloaded, Uploading, Uploaded, Failed
-  scheduledDate   DateTime? // Planned upload date
-  uploadedDate    DateTime? // Actual upload timestamp
-  targetVideoId   String?   // YouTube ID after upload
-  retryCount      Int       @default(0)
-  errorLog        String?   @db.Text
-  aiTitle         String?   // AI-enhanced title
-  aiDescription   String?   @db.Text // AI-enhanced description
-  aiHashtags      String?   // AI-generated hashtags
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  tags            String[]
+  thumbnailUrl    String?   @map("thumbnail_url")
+  duration        Int
+  publishedDate   DateTime? @map("published_date")
+  status          String    @default("Pending")
+  scheduledDate   DateTime? @map("scheduled_date")
+  uploadedDate    DateTime? @map("uploaded_date")
+  targetVideoId   String?   @map("target_video_id")
+  retryCount      Int       @default(0) @map("retry_count")
+  errorLog        String?   @db.Text @map("error_log")
+  aiTitle         String?   @map("ai_title")
+  aiDescription   String?   @db.Text @map("ai_description")
+  aiHashtags      String?   @map("ai_hashtags")
+  mappingId       String?   @db.Uuid @map("mapping_id")
+  sourceChannel   String?   @map("source_channel")
+  targetChannel   String?   @map("target_channel")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @map("updated_at")
+
+  mapping ChannelMapping? @relation(fields: [mappingId], references: [id])
 
   @@index([status])
   @@index([scheduledDate])
+  @@index([mappingId])
+  @@index([sourceChannel])
+  @@index([targetChannel])
+  @@index([uploadedDate])
+  @@index([sourceChannel, status])
+  @@index([status, uploadedDate])
+  @@index([sourceChannel, createdAt])
   @@map("shorts_data")
 }
 
 // Upload logs for tracking
 model UploadLog {
-  id          String   @id @default(cuid())
-  shortId     String
-  action      String   // fetch, download, upload, etc.
-  status      String   // success, error
+  id          String   @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  shortId     String?  @db.Uuid @map("short_id")
+  action      String
+  status      String?
   message     String?  @db.Text
-  details     String?  @db.Text // JSON details
-  createdAt   DateTime @default(now())
+  details     String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
 
   @@index([shortId])
   @@index([createdAt])
+  @@index([action])
+  @@index([action, createdAt])
   @@map("upload_logs")
 }
 
 // Scheduler state for tracking runs
 model SchedulerState {
-  id              String   @id @default(cuid())
-  lastRunAt       DateTime?
-  nextRunAt       DateTime?
-  isRunning       Boolean  @default(false)
-  uploadsToday    Int      @default(0)
-  currentStatus   String?  @db.Text
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id              String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
+  lastRunAt       DateTime? @map("last_run_at")
+  nextRunAt       DateTime? @map("next_run_at")
+  isRunning       Boolean   @default(false) @map("is_running")
+  uploadsToday    Int       @default(0) @map("uploads_today")
+  currentStatus   String?   @db.Text @map("current_status")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @map("updated_at")
 
   @@map("scheduler_state")
 }

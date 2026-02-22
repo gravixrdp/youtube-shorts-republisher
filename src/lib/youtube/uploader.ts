@@ -1,11 +1,25 @@
 import { getConfig } from '../supabase/database';
 
+function readEnv(...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
 // YouTube OAuth2 token refresh
-async function getAccessToken(): Promise<string | null> {
+async function getAccessToken(refreshTokenOverride?: string): Promise<string | null> {
   try {
-    const clientId = await getConfig('youtube_client_id');
-    const clientSecret = await getConfig('youtube_client_secret');
-    const refreshToken = await getConfig('youtube_refresh_token');
+    const clientId = (await getConfig('youtube_client_id')) || readEnv('YOUTUBE_CLIENT_ID');
+    const clientSecret = (await getConfig('youtube_client_secret')) || readEnv('YOUTUBE_CLIENT_SECRET');
+    const refreshToken =
+      refreshTokenOverride ||
+      (await getConfig('youtube_refresh_token')) ||
+      readEnv('YOUTUBE_REFRESH_TOKEN') ||
+      null;
     
     if (!clientId || !clientSecret || !refreshToken) {
       console.error('YouTube OAuth credentials not configured');
@@ -45,14 +59,17 @@ export async function uploadVideo(
   title: string,
   description: string,
   tags: string[],
-  visibility: 'public' | 'unlisted' | 'private' = 'public'
+  visibility: 'public' | 'unlisted' | 'private' = 'public',
+  options?: {
+    refreshToken?: string;
+  }
 ): Promise<{
   success: boolean;
   videoId?: string;
   error?: string;
 }> {
   try {
-    const accessToken = await getAccessToken();
+    const accessToken = await getAccessToken(options?.refreshToken);
     if (!accessToken) {
       return { success: false, error: 'Failed to get access token' };
     }
@@ -134,14 +151,17 @@ export async function uploadVideoWithProgress(
   description: string,
   tags: string[],
   visibility: 'public' | 'unlisted' | 'private' = 'public',
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  options?: {
+    refreshToken?: string;
+  }
 ): Promise<{
   success: boolean;
   videoId?: string;
   error?: string;
 }> {
   try {
-    const accessToken = await getAccessToken();
+    const accessToken = await getAccessToken(options?.refreshToken);
     if (!accessToken) {
       return { success: false, error: 'Failed to get access token' };
     }

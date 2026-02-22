@@ -5,11 +5,47 @@ import {
   getPendingShorts,
   updateShort,
   createLog,
-  getConfig
+  getConfig,
+  getChannelMappingById,
+  cleanupUploadedShortsForSingleDestination
 } from '@/lib/supabase/database';
 import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
+import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
+
+async function resolveDestinationRefreshToken(mappingId: string | null): Promise<{ refreshToken?: string; error?: string }> {
+  if (!mappingId) {
+    return {};
+  }
+
+  const mapping = await getChannelMappingById(mappingId);
+  if (!mapping || !mapping.target_channel_id) {
+    return {};
+  }
+
+  const refreshToken = await getRefreshTokenForDestinationChannel(mapping.target_channel_id);
+  if (!refreshToken) {
+    return {
+      error: `Destination channel ${mapping.target_channel_id} is not connected. Connect it from mapping screen.`,
+    };
+  }
+
+  return { refreshToken };
+}
+
+async function runUploadedCleanup() {
+  const cleanupHours = parseInt((await getConfig('uploaded_cleanup_hours')) || '5', 10);
+  return cleanupUploadedShortsForSingleDestination({ olderThanHours: Number.isNaN(cleanupHours) ? 5 : cleanupHours });
+}
+
+function buildUploadTags(existingTags: string[] | null, hashtags: string[]): string[] {
+  const tags = [...(existingTags || []), ...hashtags]
+    .map((value) => value.replace(/^#/, '').replace(/[^a-zA-Z0-9_]/g, '').trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(tags)).slice(0, 20);
+}
 
 // GET - Get scheduler state
 export async function GET() {
@@ -64,7 +100,27 @@ export async function POST(request: NextRequest) {
     // Process next pending video
     if (action === 'process_next') {
       const result = await processNextPending();
+      await runUploadedCleanup();
       return NextResponse.json(result);
+    }
+
+    // Cleanup uploaded shorts that can be safely removed
+    if (action === 'cleanup_uploaded') {
+      const cleanup = await runUploadedCleanup();
+      return NextResponse.json({
+        success: true,
+        message: 'Uploaded shorts cleanup completed',
+        cleanup
+      });
+    }
+
+    if (action === 'run_cleanup') {
+      const cleanup = await runUploadedCleanup();
+      return NextResponse.json({
+        success: true,
+        message: 'Uploaded shorts cleanup completed',
+        cleanup
+      });
     }
     
     return NextResponse.json(
@@ -108,6 +164,7 @@ async function processNextPending(): Promise<{ success: boolean; message: string
         status: 'Failed', 
         error_log: downloadResult.error 
       });
+      await createLog(short.id, 'download', 'error', downloadResult.error || 'Download failed');
       return { success: false, message: `Download failed: ${downloadResult.error}` };
     }
     
@@ -119,8 +176,12 @@ async function processNextPending(): Promise<{ success: boolean; message: string
         status: 'Failed', 
         error_log: validation.error 
       });
+      await createLog(short.id, 'validation', 'error', validation.error || 'Validation failed');
       return { success: false, message: `Validation failed: ${validation.error}` };
     }
+
+    await updateShort(short.id, { status: 'Downloaded' });
+    await createLog(short.id, 'download', 'success', `Downloaded to ${downloadResult.filePath}`);
     
     // Prepare content
     const visibility = await getConfig('default_visibility') || 'public';
@@ -144,14 +205,30 @@ async function processNextPending(): Promise<{ success: boolean; message: string
     if (hashtags.length > 0) {
       description = `${description}\n\n${hashtags.join(' ')}`;
     }
+
+    const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
+    if (destinationAuth.error) {
+      await deleteVideo(downloadResult.filePath!);
+      await updateShort(short.id, {
+        status: 'Failed',
+        error_log: destinationAuth.error
+      });
+      await createLog(short.id, 'upload', 'error', destinationAuth.error);
+      return { success: false, message: destinationAuth.error };
+    }
+
+    await updateShort(short.id, { status: 'Uploading' });
     
     // Upload
     const uploadResult = await uploadVideo(
       downloadResult.filePath!,
       title,
       description,
-      short.tags || [],
-      visibility as 'public' | 'unlisted' | 'private'
+      buildUploadTags(short.tags || [], hashtags),
+      visibility as 'public' | 'unlisted' | 'private',
+      {
+        refreshToken: destinationAuth.refreshToken
+      }
     );
     
     // Clean up
@@ -162,6 +239,7 @@ async function processNextPending(): Promise<{ success: boolean; message: string
         status: 'Failed', 
         error_log: uploadResult.error 
       });
+      await createLog(short.id, 'upload', 'error', uploadResult.error || 'Upload failed');
       return { success: false, message: `Upload failed: ${uploadResult.error}` };
     }
     
@@ -171,6 +249,7 @@ async function processNextPending(): Promise<{ success: boolean; message: string
       uploaded_date: new Date().toISOString(),
       target_video_id: uploadResult.videoId
     });
+    await createLog(short.id, 'upload', 'success', `Uploaded as ${uploadResult.videoId}`);
     
     // Update scheduler state
     await updateSchedulerState({
@@ -199,18 +278,16 @@ async function runSchedulerProcess(): Promise<void> {
       is_running: true, 
       current_status: 'Processing...' 
     });
-    
-    // Get uploads per day
-    const uploadsPerDay = parseInt(await getConfig('uploads_per_day') || '2');
-    
-    for (let i = 0; i < uploadsPerDay; i++) {
-      const result = await processNextPending();
-      if (!result.success) {
-        console.log('Scheduler stopped:', result.message);
-        break;
-      }
+
+    // Process only one short per scheduler run.
+    const result = await processNextPending();
+    if (!result.success) {
+      console.log('Scheduler stopped:', result.message);
+    } else {
       console.log('Uploaded:', result.videoId);
     }
+
+    await runUploadedCleanup();
     
     await updateSchedulerState({ 
       is_running: false, 

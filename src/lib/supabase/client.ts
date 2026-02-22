@@ -35,6 +35,9 @@ export interface ShortsData {
   ai_title: string | null;
   ai_description: string | null;
   ai_hashtags: string | null;
+  mapping_id: string | null;
+  source_channel: string | null;
+  target_channel: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -49,7 +52,7 @@ export interface Config {
 
 export interface UploadLog {
   id: string;
-  short_id: string;
+  short_id: string | null;
   action: string;
   status: 'success' | 'error';
   message: string | null;
