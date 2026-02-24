@@ -20,6 +20,7 @@ async function createScrapeRunLog(
     source_channel_id?: string;
     source_channel_url?: string;
     mapping_id?: string;
+    mapping_name?: string;
     total?: number;
     added?: number;
     duplicates?: number;
@@ -290,6 +291,7 @@ export async function POST(request: NextRequest) {
           source_channel_id: mapping?.source_channel_id,
           source_channel_url: mapping?.source_channel_url || channelUrl,
           mapping_id: mappingId || undefined,
+          mapping_name: mapping?.name || undefined,
         });
 
         return NextResponse.json(
@@ -340,6 +342,7 @@ export async function POST(request: NextRequest) {
         source_channel_id: mapping?.source_channel_id,
         source_channel_url: mapping?.source_channel_url || channelUrl,
         mapping_id: mappingId || undefined,
+        mapping_name: mapping?.name || undefined,
         total: result.shorts.length,
         added,
         duplicates,
@@ -387,6 +390,7 @@ export async function POST(request: NextRequest) {
             source_channel_id: mapping.source_channel_id,
             source_channel_url: mapping.source_channel_url,
             mapping_id: mapping.id,
+            mapping_name: mapping.name,
           });
           continue;
         }
@@ -440,6 +444,7 @@ export async function POST(request: NextRequest) {
           source_channel_id: mapping.source_channel_id,
           source_channel_url: mapping.source_channel_url,
           mapping_id: mapping.id,
+          mapping_name: mapping.name,
           total: result.shorts.length,
           added: mappingAdded,
           duplicates: mappingDuplicates,

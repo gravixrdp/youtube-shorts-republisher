@@ -55,14 +55,13 @@ export function parseDuration(duration: string): number {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-// Check if video is a Short (≤ 60 seconds and vertical)
+// Check if video should be considered a Short candidate from source feed
 export function isShort(duration: number, title: string, description: string): boolean {
   void title;
   void description;
 
-  // Shorts can be up to 3 minutes; rely on duration to avoid missing videos without #shorts tags.
-  if (duration <= 0) return false;
-  return duration <= 180;
+  // YouTube Shorts can be up to 3 minutes. Exclude long-form uploads.
+  return Number.isFinite(duration) && duration > 0 && duration <= 180;
 }
 
 // Extract channel ID from URL

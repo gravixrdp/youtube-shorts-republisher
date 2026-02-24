@@ -160,15 +160,12 @@ export async function validateVideo(filePath: string): Promise<{
     const aspectRatio = height / width;
     const isVertical = aspectRatio >= 1.5 && aspectRatio <= 2.0;
     
-    // Check duration ≤ 60 seconds
-    const isShortDuration = duration <= 60;
-    
     if (!isVertical) {
       return { valid: false, error: 'Video is not vertical (9:16 format)', width, height, duration };
     }
-    
-    if (!isShortDuration) {
-      return { valid: false, error: 'Video duration exceeds 60 seconds', width, height, duration };
+
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return { valid: false, error: 'Invalid video duration', width, height, duration };
     }
     
     return { valid: true, width, height, duration };

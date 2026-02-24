@@ -57,6 +57,12 @@ export interface UploadLog {
   status: 'success' | 'error';
   message: string | null;
   details: string | null;
+  mapping_id?: string | null;
+  mapping_name?: string | null;
+  source_channel?: string | null;
+  target_channel?: string | null;
+  video_id?: string | null;
+  short_title?: string | null;
   created_at: string;
 }
 

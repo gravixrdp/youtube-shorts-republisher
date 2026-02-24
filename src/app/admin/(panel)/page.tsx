@@ -79,6 +79,12 @@ interface Log {
   action: string;
   status: string;
   message: string | null;
+  mapping_id?: string | null;
+  mapping_name?: string | null;
+  source_channel?: string | null;
+  target_channel?: string | null;
+  video_id?: string | null;
+  short_title?: string | null;
   created_at: string;
 }
 
@@ -155,6 +161,8 @@ interface ScrapeRun {
   created_at: string;
   source_channel_id: string | null;
   source_channel_url: string | null;
+  mapping_id?: string | null;
+  mapping_name?: string | null;
   stats: {
     total: number;
     added: number;
@@ -254,6 +262,47 @@ function normalizeTimeValue(raw: string | null | undefined, fallback: string): s
   const value = raw.trim();
   if (!value) return fallback;
   return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value) ? value : fallback;
+}
+
+function formatMappingLabel(mappingId?: string | null, mappingName?: string | null): string {
+  const id = mappingId?.trim() || '';
+  const name = mappingName?.trim() || '';
+
+  if (id && name) {
+    return `${name} (${id})`;
+  }
+
+  if (id) {
+    return id;
+  }
+
+  return 'Global / Unmapped';
+}
+
+function buildLogContextRows(log: Log): string[] {
+  const rows = [`Mapping: ${formatMappingLabel(log.mapping_id, log.mapping_name)}`];
+
+  if (log.source_channel?.trim()) {
+    rows.push(`Source: ${log.source_channel.trim()}`);
+  }
+
+  if (log.target_channel?.trim()) {
+    rows.push(`Target: ${log.target_channel.trim()}`);
+  }
+
+  if (log.short_id?.trim()) {
+    rows.push(`Short ID: ${log.short_id.trim()}`);
+  }
+
+  if (log.video_id?.trim()) {
+    rows.push(`Video ID: ${log.video_id.trim()}`);
+  }
+
+  if (log.short_title?.trim()) {
+    rows.push(`Title: ${log.short_title.trim()}`);
+  }
+
+  return rows;
 }
 
 function getDatePartsInTimezone(date: Date, timeZone: string) {
@@ -2061,6 +2110,11 @@ export default function GRAVIX() {
                                   </span>
                                 </div>
                                 {log.message && <p className="text-xs text-muted-foreground">{log.message}</p>}
+                                {buildLogContextRows(log).map((row, index) => (
+                                  <p key={`${log.id}-recent-context-${index}`} className="text-[10px] text-muted-foreground">
+                                    {row}
+                                  </p>
+                                ))}
                               </div>
                             </div>
                           ))}
@@ -2268,6 +2322,14 @@ export default function GRAVIX() {
                                 {run.status}
                               </Badge>
                             </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Mapping: {formatMappingLabel(run.mapping_id, run.mapping_name)}
+                            </p>
+                            {(run.source_channel_id || run.source_channel_url) && (
+                              <p className="text-[10px] text-muted-foreground">
+                                Source: {run.source_channel_id || run.source_channel_url}
+                              </p>
+                            )}
                             <p className="text-[10px] text-muted-foreground">
                               Added {run.stats.added}, duplicates {run.stats.duplicates}, errors {run.stats.errors}, total {run.stats.total}
                             </p>
@@ -3115,6 +3177,11 @@ export default function GRAVIX() {
                               </Badge>
                             </div>
                             {log.message && <p className="text-xs text-muted-foreground">{log.message}</p>}
+                            {buildLogContextRows(log).map((row, index) => (
+                              <p key={`${log.id}-timeline-context-${index}`} className="text-[10px] text-muted-foreground">
+                                {row}
+                              </p>
+                            ))}
                             <p className="text-[10px] text-muted-foreground">{new Date(log.created_at).toLocaleString()}</p>
                           </div>
                         </div>

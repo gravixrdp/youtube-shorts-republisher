@@ -6,6 +6,7 @@ interface ScrapeDetails {
   source_channel_id?: string;
   source_channel_url?: string;
   mapping_id?: string;
+  mapping_name?: string;
   total?: number;
   added?: number;
   duplicates?: number;
@@ -69,6 +70,8 @@ export async function GET() {
         created_at: run.created_at,
         source_channel_id: details.source_channel_id || null,
         source_channel_url: details.source_channel_url || null,
+        mapping_id: details.mapping_id || null,
+        mapping_name: details.mapping_name || null,
         stats: {
           total: details.total || 0,
           added: details.added || 0,

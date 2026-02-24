@@ -23,6 +23,65 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-24 16:35 UTC — Codex
+- Re-aligned source scraping to strict Shorts-only behavior (no long-form ingestion):
+  - `isShort(...)` now enforces `duration > 0 && duration <= 180`.
+  - File:
+    - `src/lib/youtube/scraper.ts`
+- Live data check before change:
+  - Queried `/api/videos?limit=200&withTotal=false` and counted rows with `duration > 180`.
+  - Result: `TOTAL=95`, `LONG_GT_180=0` (no long-form videos currently mixed in DB).
+- Deployment:
+  - `npm run lint` passed.
+  - `npm run build` passed (standalone artifact regenerated).
+  - Restarted services:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+  - Verified both active after restart at `2026-02-24 16:34 UTC`.
+
+### 2026-02-24 16:25 UTC — Codex
+- Runtime fix deployment verification for duration-cap removal:
+  - Identified live scheduler/web services were still old processes from `2026-02-22 13:18:33 UTC`, so old `Video duration exceeds 60 seconds` validation was still active in memory.
+  - Verified old failure in scheduler logs at `2026-02-24 16:20:05 UTC` (`Asia/Kolkata 21:50:05`): `Validation failed: Video duration exceeds 60 seconds`.
+  - Restarted services with sudo:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+  - Verified both services restarted at `2026-02-24 16:24:17 UTC` and are running fresh processes.
+  - Verified scheduler health endpoint after restart: `{"status":"healthy","isRunning":false,"lastRunTime":null}`.
+- Verified live API response now includes mapping-visible enriched log fields (`mapping_id`, `mapping_name`, `source_channel`, `target_channel`, `video_id`, `short_title`) from `/api/stats?includeLogs=true`.
+- Note:
+  - Existing `Video duration exceeds 60 seconds` rows in Activity Timeline are historical database logs from runs before restart; they remain visible until replaced/cleaned.
+
+### 2026-02-24 16:13 UTC — Codex
+- Removed hard short-duration caps from source filtering and upload validation:
+  - `fetch` filtering no longer enforces a max duration; positive duration videos are accepted.
+  - Upload validation no longer rejects videos over 60s; vertical format validation is still enforced.
+  - Files:
+    - `src/lib/youtube/scraper.ts`
+    - `src/lib/youtube/video-handler.ts`
+- Added mapping/source context enrichment for activity logs:
+  - `getRecentLogs` now enriches each log with best-effort `mapping_id`, `mapping_name`, `source_channel`, `target_channel`, `video_id`, and `short_title` using `upload_logs.details`, `shorts_data`, and `channel_mappings`.
+  - Upload log type now includes optional enriched context fields.
+  - Files:
+    - `src/lib/supabase/database.ts`
+    - `src/lib/supabase/client.ts`
+- Extended scrape-run log payload and monitor API with mapping context:
+  - Scrape log details now include `mapping_name` for mapping-driven runs.
+  - `/api/scraping` run payload now returns `mapping_id` and `mapping_name`.
+  - Files:
+    - `src/app/api/videos/route.ts`
+    - `src/app/api/scraping/route.ts`
+- Updated admin UI to display mapping/source/target/video context in logs:
+  - Added context rows in Dashboard `Recent Activity` and `Logs` tab `Activity Timeline`.
+  - Added mapping/source identity display in `Sources` tab `Scraping Monitor` run cards.
+  - Files:
+    - `src/app/admin/(panel)/page.tsx`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed (standalone artifact regenerated).
+  - Confirmed no `60s` duration rejection string remains in built runtime:
+    - `rg -n "duration exceeds 60 seconds|<= 60|duration<=60|duration <= 60|isShortDuration" .next/standalone/.next/server/chunks .next/standalone/src`
+
 ### 2026-02-22 13:19 UTC — Codex
 - Reduced admin-panel polling load to lower VPS + Supabase pressure:
   - Removed overlapping base 30s stats interval.

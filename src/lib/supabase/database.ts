@@ -1047,6 +1047,57 @@ export async function cleanupUploadedShortsForSingleDestination(
 
 // ==================== UPLOAD LOGS ====================
 
+interface UploadLogDetails {
+  mapping_id?: string;
+  mapping_name?: string;
+  source_channel?: string;
+  source_channel_id?: string;
+  source_channel_url?: string;
+  target_channel?: string;
+  video_id?: string;
+  short_title?: string;
+}
+
+interface ShortLogContext {
+  mappingId: string | null;
+  sourceChannel: string | null;
+  targetChannel: string | null;
+  videoId: string | null;
+  shortTitle: string | null;
+}
+
+function parseUploadLogDetails(raw: string | null): UploadLogDetails {
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed as UploadLogDetails;
+  } catch {
+    return {};
+  }
+}
+
+function readDetailString(details: UploadLogDetails, ...keys: Array<keyof UploadLogDetails>): string | null {
+  for (const key of keys) {
+    const raw = details[key];
+    if (typeof raw !== 'string') {
+      continue;
+    }
+
+    const trimmed = raw.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  return null;
+}
+
 export async function createLog(
   shortId: string | null, 
   action: string, 
@@ -1095,8 +1146,111 @@ export async function getRecentLogs(limit: number = 50): Promise<UploadLog[]> {
     .order('created_at', { ascending: false })
     .limit(limit);
 
-  if (error) return [];
-  return data || [];
+  if (error || !data || data.length === 0) return [];
+
+  const logs = data as UploadLog[];
+  const detailsByLogId = new Map<string, UploadLogDetails>();
+  const shortIds = new Set<string>();
+  const mappingIds = new Set<string>();
+
+  for (const log of logs) {
+    const details = parseUploadLogDetails(log.details);
+    detailsByLogId.set(log.id, details);
+
+    const shortId = log.short_id?.trim();
+    if (shortId) {
+      shortIds.add(shortId);
+    }
+
+    const mappingId = readDetailString(details, 'mapping_id');
+    if (mappingId) {
+      mappingIds.add(mappingId);
+    }
+  }
+
+  const shortContextById = new Map<string, ShortLogContext>();
+  for (const batch of chunkValues(Array.from(shortIds), 200)) {
+    const { data: shortRows, error: shortError } = await supabaseAdmin
+      .from('shorts_data')
+      .select('id, mapping_id, source_channel, target_channel, video_id, title')
+      .in('id', batch);
+
+    if (shortError) {
+      console.error('Error loading short context for logs:', shortError);
+      break;
+    }
+
+    for (const row of shortRows || []) {
+      const rowId = typeof row.id === 'string' ? row.id.trim() : '';
+      if (!rowId) {
+        continue;
+      }
+
+      const mappingId = typeof row.mapping_id === 'string' && row.mapping_id.trim() ? row.mapping_id.trim() : null;
+      const sourceChannel = typeof row.source_channel === 'string' && row.source_channel.trim() ? row.source_channel.trim() : null;
+      const targetChannel = typeof row.target_channel === 'string' && row.target_channel.trim() ? row.target_channel.trim() : null;
+      const videoId = typeof row.video_id === 'string' && row.video_id.trim() ? row.video_id.trim() : null;
+      const shortTitle = typeof row.title === 'string' && row.title.trim() ? row.title.trim() : null;
+
+      shortContextById.set(rowId, {
+        mappingId,
+        sourceChannel,
+        targetChannel,
+        videoId,
+        shortTitle,
+      });
+
+      if (mappingId) {
+        mappingIds.add(mappingId);
+      }
+    }
+  }
+
+  const mappingNameById = new Map<string, string>();
+  for (const batch of chunkValues(Array.from(mappingIds), 200)) {
+    const { data: mappings, error: mappingError } = await supabaseAdmin
+      .from('channel_mappings')
+      .select('id, name')
+      .in('id', batch);
+
+    if (mappingError) {
+      console.error('Error loading mapping names for logs:', mappingError);
+      break;
+    }
+
+    for (const mapping of mappings || []) {
+      const id = typeof mapping.id === 'string' ? mapping.id.trim() : '';
+      const name = typeof mapping.name === 'string' ? mapping.name.trim() : '';
+      if (!id || !name) {
+        continue;
+      }
+      mappingNameById.set(id, name);
+    }
+  }
+
+  return logs.map((log) => {
+    const details = detailsByLogId.get(log.id) || {};
+    const shortId = log.short_id?.trim() || null;
+    const shortContext = shortId ? shortContextById.get(shortId) : undefined;
+
+    const mappingId = readDetailString(details, 'mapping_id') || shortContext?.mappingId || null;
+    const mappingName = readDetailString(details, 'mapping_name') || (mappingId ? mappingNameById.get(mappingId) || null : null);
+    const sourceChannel =
+      readDetailString(details, 'source_channel', 'source_channel_id', 'source_channel_url') || shortContext?.sourceChannel || null;
+    const targetChannel = readDetailString(details, 'target_channel') || shortContext?.targetChannel || null;
+    const videoId = readDetailString(details, 'video_id') || shortContext?.videoId || null;
+    const shortTitle = readDetailString(details, 'short_title') || shortContext?.shortTitle || null;
+
+    return {
+      ...log,
+      mapping_id: mappingId,
+      mapping_name: mappingName,
+      source_channel: sourceChannel,
+      target_channel: targetChannel,
+      video_id: videoId,
+      short_title: shortTitle,
+    };
+  });
 }
 
 // ==================== SCHEDULER STATE ====================
