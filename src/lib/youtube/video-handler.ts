@@ -8,12 +8,187 @@ const execAsync = promisify(exec);
 
 const TEMP_DIR = process.env.TEMP_VIDEO_DIR || path.join('/tmp', 'youtube-shorts-republisher');
 const DOWNLOAD_TIMEOUT_MS = 300000;
+const ENHANCE_TIMEOUT_MS = resolveTimeoutMs(900000, process.env.SHORTS_ENHANCE_TIMEOUT_MS, process.env.VIDEO_ENHANCE_TIMEOUT_MS);
 const COMMAND_BUFFER_SIZE = 1024 * 1024 * 12;
 const YT_DLP_BIN = process.env.YT_DLP_BIN || (process.env.HOME ? path.join(process.env.HOME, '.local', 'bin', 'yt-dlp') : 'yt-dlp');
+const QUALITY_PROFILE_ENV_KEYS = ['SHORTS_ENHANCE_PROFILE', 'VIDEO_ENHANCE_PROFILE', 'SHORTS_UPLOAD_QUALITY_PROFILE'] as const;
+const QUALITY_PRESET_ENV_KEYS = ['SHORTS_ENHANCE_PRESET', 'VIDEO_ENHANCE_PRESET'] as const;
+const VALID_ENHANCEMENT_PRESETS = new Set([
+  'ultrafast',
+  'superfast',
+  'veryfast',
+  'faster',
+  'fast',
+  'medium',
+  'slow',
+  'slower',
+  'veryslow',
+  'placebo',
+]);
+
+export type VideoQualityProfile = 'source' | '4k' | '8k';
+
+interface VideoEnhancementTarget {
+  width: number;
+  height: number;
+  crf: number;
+}
+
+const VIDEO_QUALITY_TARGETS: Record<Exclude<VideoQualityProfile, 'source'>, VideoEnhancementTarget> = {
+  '4k': {
+    width: 2160,
+    height: 3840,
+    crf: 18,
+  },
+  '8k': {
+    width: 4320,
+    height: 7680,
+    crf: 20,
+  },
+};
 
 interface ExecFailure extends Error {
   stderr?: string;
   stdout?: string;
+}
+
+interface PrepareVideoFailure {
+  success: false;
+  usedProfile: VideoQualityProfile;
+  error: string;
+}
+
+interface PrepareVideoSuccess {
+  success: true;
+  filePath: string;
+  usedProfile: VideoQualityProfile;
+  enhanced: boolean;
+  warning?: string;
+}
+
+export type PrepareVideoResult = PrepareVideoFailure | PrepareVideoSuccess;
+
+function resolveTimeoutMs(fallbackMs: number, ...rawValues: Array<string | undefined>): number {
+  for (const raw of rawValues) {
+    if (!raw) {
+      continue;
+    }
+
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return fallbackMs;
+}
+
+function readEnvValue(...keys: string[]): string | null {
+  for (const key of keys) {
+    const raw = process.env[key];
+    if (!raw) {
+      continue;
+    }
+
+    const trimmed = raw.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  return null;
+}
+
+function parseBooleanEnv(raw: string | null): boolean {
+  if (!raw) {
+    return false;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function normalizeQualityProfile(raw: string | null | undefined): VideoQualityProfile | null {
+  if (!raw) {
+    return null;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === 'source' || normalized === 'original' || normalized === 'off' || normalized === 'none') {
+    return 'source';
+  }
+
+  if (normalized === '4k' || normalized === '2160p' || normalized === 'uhd') {
+    return '4k';
+  }
+
+  if (normalized === '8k' || normalized === '4320p') {
+    return '8k';
+  }
+
+  return null;
+}
+
+function resolveQualityProfile(profileOverride?: VideoQualityProfile | string | null): VideoQualityProfile {
+  const fromOverride = normalizeQualityProfile(
+    typeof profileOverride === 'string' ? profileOverride : profileOverride || null
+  );
+  if (fromOverride) {
+    return fromOverride;
+  }
+
+  const fromEnv = normalizeQualityProfile(readEnvValue(...QUALITY_PROFILE_ENV_KEYS));
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  return 'source';
+}
+
+function resolveEnhancementStrictMode(): boolean {
+  return parseBooleanEnv(readEnvValue('SHORTS_ENHANCE_STRICT', 'VIDEO_ENHANCE_STRICT'));
+}
+
+function resolveEnhancementPreset(): string {
+  const raw = readEnvValue(...QUALITY_PRESET_ENV_KEYS);
+  const normalized = raw ? raw.trim().toLowerCase() : '';
+  if (!normalized) {
+    return 'faster';
+  }
+
+  return VALID_ENHANCEMENT_PRESETS.has(normalized) ? normalized : 'faster';
+}
+
+function resolveEnhancementThreads(): number {
+  const raw = readEnvValue('SHORTS_ENHANCE_THREADS', 'VIDEO_ENHANCE_THREADS');
+  if (!raw) {
+    return 1;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 1;
+  }
+
+  return Math.min(8, Math.max(1, Math.floor(parsed)));
+}
+
+function sanitizeFileToken(raw: string): string {
+  const sanitized = raw.replace(/[^a-zA-Z0-9._-]/g, '_').trim();
+  return sanitized || 'video';
+}
+
+function resolveEnhancedOutputPath(inputPath: string, videoId: string, profile: Exclude<VideoQualityProfile, 'source'>): string {
+  const token = sanitizeFileToken(videoId || path.basename(inputPath, path.extname(inputPath)));
+  return path.join(path.dirname(inputPath), `${token}.${profile}.enhanced.mp4`);
+}
+
+function buildUpscaleFilter(target: VideoEnhancementTarget): string {
+  return `scale=${target.width}:${target.height}:flags=lanczos:force_original_aspect_ratio=decrease,pad=${target.width}:${target.height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`;
 }
 
 function compactMultiline(value: string, maxLength: number = 1500): string {
@@ -42,10 +217,13 @@ function formatExecError(error: unknown, fallback: string): string {
   return compactMultiline(`${message}\n${details}`);
 }
 
-async function runShellCommand(command: string): Promise<{ success: boolean; error?: string }> {
+async function runShellCommand(
+  command: string,
+  timeoutMs: number = DOWNLOAD_TIMEOUT_MS
+): Promise<{ success: boolean; error?: string }> {
   try {
     await execAsync(command, {
-      timeout: DOWNLOAD_TIMEOUT_MS,
+      timeout: timeoutMs,
       maxBuffer: COMMAND_BUFFER_SIZE,
     });
     return { success: true };
@@ -99,12 +277,12 @@ export async function downloadVideo(
     
     // Primary strategy: high-quality MP4 with Android/Web clients.
     const ytDlpBin = resolveYtDlpBinary();
-    const primaryCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android,web" -f "bv*[ext=mp4][height<=2160]+ba[ext=m4a]/b[ext=mp4][height<=2160]/b" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
+    const primaryCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android,web" -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
     const primaryResult = await runShellCommand(primaryCommand);
 
     if (!primaryResult.success) {
       // Fallback strategy: less strict format to reduce 403/nsig failures.
-      const fallbackCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android" -f "best[ext=mp4][height<=1080]/best[height<=1080]/best" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
+      const fallbackCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android" -f "bv*+ba/b" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
       const fallbackResult = await runShellCommand(fallbackCommand);
 
       if (!fallbackResult.success) {
@@ -129,6 +307,89 @@ export async function downloadVideo(
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Download failed'
+    };
+  }
+}
+
+export async function prepareVideoForUpload(
+  filePath: string,
+  videoId: string,
+  profileOverride?: VideoQualityProfile | string | null
+): Promise<PrepareVideoResult> {
+  const profile = resolveQualityProfile(profileOverride);
+  if (profile === 'source') {
+    return {
+      success: true,
+      filePath,
+      usedProfile: profile,
+      enhanced: false,
+    };
+  }
+
+  const strictMode = resolveEnhancementStrictMode();
+  const outputPath = resolveEnhancedOutputPath(filePath, videoId, profile);
+  if (outputPath === filePath) {
+    return {
+      success: true,
+      filePath,
+      usedProfile: profile,
+      enhanced: false,
+      warning: `Enhancement skipped because source file already matches ${profile.toUpperCase()} output path`,
+    };
+  }
+
+  const target = VIDEO_QUALITY_TARGETS[profile];
+  const preset = resolveEnhancementPreset();
+  const threads = resolveEnhancementThreads();
+  const filter = buildUpscaleFilter(target);
+  const command = `ffmpeg -y -threads ${threads} -i "${filePath}" -vf "${filter}" -c:v libx264 -preset ${preset} -crf ${target.crf} -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +faststart "${outputPath}"`;
+
+  try {
+    await fs.rm(outputPath, { force: true });
+
+    const enhancementResult = await runShellCommand(command, ENHANCE_TIMEOUT_MS);
+    if (!enhancementResult.success) {
+      const baseError = `Video enhancement failed for ${profile.toUpperCase()}: ${enhancementResult.error || 'unknown ffmpeg error'}`;
+      if (strictMode) {
+        return {
+          success: false,
+          usedProfile: profile,
+          error: compactMultiline(baseError),
+        };
+      }
+
+      return {
+        success: true,
+        filePath,
+        usedProfile: profile,
+        enhanced: false,
+        warning: compactMultiline(`${baseError}. Uploading original source file instead.`),
+      };
+    }
+
+    await fs.access(outputPath);
+    return {
+      success: true,
+      filePath: outputPath,
+      usedProfile: profile,
+      enhanced: true,
+    };
+  } catch (error) {
+    const message = formatExecError(error, `Video enhancement failed for ${profile.toUpperCase()}`);
+    if (strictMode) {
+      return {
+        success: false,
+        usedProfile: profile,
+        error: message,
+      };
+    }
+
+    return {
+      success: true,
+      filePath,
+      usedProfile: profile,
+      enhanced: false,
+      warning: compactMultiline(`${message}. Uploading original source file instead.`),
     };
   }
 }

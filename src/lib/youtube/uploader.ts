@@ -73,10 +73,12 @@ export async function uploadVideo(
     if (!accessToken) {
       return { success: false, error: 'Failed to get access token' };
     }
-    
-    // Read video file
+
+    // Stream video file to avoid loading large 4K/8K files fully into memory.
     const fs = await import('fs/promises');
-    const videoData = await fs.readFile(filePath);
+    const fsSync = await import('fs');
+    const stats = await fs.stat(filePath);
+    const videoStream = fsSync.createReadStream(filePath);
     
     // Prepare metadata
     const metadata = {
@@ -123,8 +125,9 @@ export async function uploadVideo(
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'video/*',
+        'Content-Length': stats.size.toString(),
       },
-      body: videoData,
+      body: videoStream as unknown as BodyInit,
     });
     
     if (!uploadResponse.ok) {
@@ -165,10 +168,11 @@ export async function uploadVideoWithProgress(
     if (!accessToken) {
       return { success: false, error: 'Failed to get access token' };
     }
-    
+
     const fs = await import('fs/promises');
-    const videoData = await fs.readFile(filePath);
-    const totalSize = videoData.length;
+    const fsSync = await import('fs');
+    const fileStats = await fs.stat(filePath);
+    const totalSize = fileStats.size;
     
     const metadata = {
       snippet: {
@@ -209,8 +213,11 @@ export async function uploadVideoWithProgress(
     // Chunked upload for progress tracking
     const chunkSize = 1024 * 1024 * 8; // 8MB chunks
     let uploadedBytes = 0;
+    void chunkSize;
+    void uploadedBytes;
     
     // For simplicity, upload all at once (progress tracking would require more complex implementation)
+    const videoStream = fsSync.createReadStream(filePath);
     const uploadResponse = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -218,7 +225,7 @@ export async function uploadVideoWithProgress(
         'Content-Type': 'video/*',
         'Content-Length': totalSize.toString(),
       },
-      body: videoData,
+      body: videoStream as unknown as BodyInit,
     });
     
     if (onProgress) {

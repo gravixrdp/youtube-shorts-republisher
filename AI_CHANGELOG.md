@@ -23,6 +23,91 @@ Use this file as the single coordination source between Codex and Antigravity.
 
 ## Changes Log (newest first)
 
+### 2026-02-24 17:58 UTC — Codex
+- Fixed "download-only, no upload" behavior under high-quality mode:
+  - Root cause identified from system logs: web app was OOM-killed during/after 4K processing (`memory peak ~1.7G`), so pipeline stopped before upload log.
+  - Added immediate quality-progress log before enhancement starts so dashboard no longer looks stuck at download-only.
+  - Files:
+    - `src/app/api/scheduler/route.ts`
+    - `src/app/api/youtube/route.ts`
+- Reduced memory pressure for high-quality uploads:
+  - Replaced full-file in-memory read with streaming upload (`createReadStream`) in YouTube uploader.
+  - Added `Content-Length` from file stat for resumable upload PUT.
+  - File:
+    - `src/lib/youtube/uploader.ts`
+- Improved enhancement speed control:
+  - Added configurable FFmpeg preset env support (`SHORTS_ENHANCE_PRESET` / `VIDEO_ENHANCE_PRESET`) and set runtime default to `faster`.
+  - File:
+    - `src/lib/youtube/video-handler.ts`
+    - `.env`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed (standalone artifact regenerated).
+  - Restarted services:
+    - `youtube-shorts-republisher-web.service`
+    - `youtube-shorts-republisher-scheduler.service`
+  - Live trigger check shows expected sequence now starts as:
+    - `process` -> `download` -> `quality (Starting high-quality enhancement before upload)`
+
+### 2026-02-24 17:34 UTC — Codex
+- Added upload-quality enhancement pipeline for Shorts processing (scheduler + manual API):
+  - New `prepareVideoForUpload(...)` in video handler supports profile-based prep: `source`, `4k`, `8k`.
+  - Uses FFmpeg upscale/transcode with vertical-safe canvas fit before upload.
+  - Added quality-step log events (`action=quality`) for success/fallback/failure visibility.
+  - Files:
+    - `src/lib/youtube/video-handler.ts`
+    - `src/app/api/scheduler/route.ts`
+    - `src/app/api/youtube/route.ts`
+- Improved source download quality selection:
+  - Removed hard height caps from yt-dlp format selection to pull highest available source streams.
+  - File:
+    - `src/lib/youtube/video-handler.ts`
+- Added runtime env defaults for high-quality upload prep:
+  - `SHORTS_ENHANCE_PROFILE=4k`
+  - `SHORTS_ENHANCE_STRICT=false`
+  - `SHORTS_ENHANCE_TIMEOUT_MS=900000`
+  - File:
+    - `.env`
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed (standalone artifact regenerated).
+  - Confirmed standalone source includes quality-prep path (`prepareVideoForUpload`, `SHORTS_ENHANCE_PROFILE`).
+  - Confirmed no `Video duration exceeds 60 seconds` string in `.next/standalone` runtime search.
+
+### 2026-02-24 17:12 UTC — Codex
+- Fixed multi-destination queueing for same source channel (one source -> many mappings):
+  - Root cause found live: all pending source shorts were tied to one mapping (`recavo`), so second mapping (`testing`) showed `Pending: 0`.
+  - Added scoped duplicate checks by `video_id + mapping/source scope` instead of global `video_id` check in fetch pipeline.
+  - Updated mapping fetch flow so same source video can be stored independently per mapping.
+  - File:
+    - `src/app/api/videos/route.ts`
+- Updated shorts-link + claim behavior to support per-mapping copies:
+  - `linkUnmappedSourceShortsToMapping(...)` now creates mapping-specific pending copies from source history (does not steal queue from another mapping).
+  - `claimOldestUnmappedPendingShortForMapping(...)` now clones unmapped source rows into mapping queue (instead of moving row), so multiple mappings can consume same source video independently.
+  - Added scoped lookup helper `getShortByVideoIdForScope(...)`.
+  - File:
+    - `src/lib/supabase/database.ts`
+- Updated schema model for multi-mapping compatibility:
+  - Removed global unique requirement from `shorts_data.video_id`.
+  - Added scoped uniqueness rules:
+    - unique `(video_id, source_channel)` where `mapping_id IS NULL`
+    - unique `(video_id, mapping_id)` where `mapping_id IS NOT NULL`
+  - Files:
+    - `supabase-schema.sql`
+    - `prisma/schema.prisma`
+- Applied live DB SQL patch via `prisma db execute`:
+  - Dropped `shorts_data_video_id_key` global unique constraint.
+  - Added new scoped indexes/uniques above.
+- Verification:
+  - `npm run lint` passed.
+  - `npm run build` passed.
+  - Services restarted: `youtube-shorts-republisher-web.service`, `youtube-shorts-republisher-scheduler.service`.
+  - Live mapping fetch test for `testing` mapping returned:
+    - `total=98, added=98, duplicates=0`
+  - Live pending counts after test:
+    - `testing_pending=98`
+    - `recavo_pending=97`
+
 ### 2026-02-24 16:35 UTC — Codex
 - Re-aligned source scraping to strict Shorts-only behavior (no long-form ingestion):
   - `isShort(...)` now enforces `duration > 0 && duration <= 180`.

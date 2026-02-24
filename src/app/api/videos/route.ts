@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { 
   createShort, 
-  getShortByVideoId, 
+  getShortByVideoIdForScope,
   getAllShorts, 
   updateShort, 
   deleteShort,
@@ -65,7 +65,13 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { action, channelUrl, mappingId, ...data } = body;
 
-    const persistShort = async (payload: Parameters<typeof createShort>[0]) => {
+    const persistShort = async (
+      payload: Parameters<typeof createShort>[0],
+      duplicateScope?: {
+        mappingId?: string | null;
+        sourceChannel?: string | null;
+      }
+    ) => {
       const created = await createShort(payload);
       if (created) {
         await createLog(created.id, 'fetch', 'success', 'Fetched from source channel');
@@ -73,7 +79,16 @@ export async function POST(request: NextRequest) {
       }
 
       // If insert failed but video exists now, treat as duplicate (safe on restart/re-scrape).
-      const existing = payload.video_id ? await getShortByVideoId(payload.video_id) : null;
+      const existing =
+        payload.video_id
+          ? await getShortByVideoIdForScope(payload.video_id, {
+              mappingId:
+                duplicateScope && Object.prototype.hasOwnProperty.call(duplicateScope, 'mappingId')
+                  ? duplicateScope.mappingId ?? null
+                  : undefined,
+              sourceChannel: duplicateScope?.sourceChannel || null,
+            })
+          : null;
       if (existing) {
         return 'duplicate' as const;
       }
@@ -142,6 +157,9 @@ export async function POST(request: NextRequest) {
           mapping_id: null,
           source_channel: sourceChannelId,
           target_channel: null,
+        }, {
+          mappingId: null,
+          sourceChannel: sourceChannelId,
         });
 
         if (outcome === 'added') added++;
@@ -214,6 +232,9 @@ export async function POST(request: NextRequest) {
             mapping_id: null,
             source_channel: source.channel_id,
             target_channel: null,
+          }, {
+            mappingId: null,
+            sourceChannel: source.channel_id,
           });
 
           if (outcome === 'added') {
@@ -304,15 +325,9 @@ export async function POST(request: NextRequest) {
       let added = 0;
       let duplicates = 0;
       let errors = 0;
+      const sourceChannelValue = mapping?.source_channel_id || channelUrl;
       
       for (const short of result.shorts) {
-        // Check for duplicates
-        const existing = await getShortByVideoId(short.videoId);
-        if (existing) {
-          duplicates++;
-          continue;
-        }
-        
         const outcome = await persistShort({
           video_id: short.videoId,
           video_url: short.videoUrl,
@@ -324,8 +339,11 @@ export async function POST(request: NextRequest) {
           published_date: short.publishedDate,
           status: 'Pending',
           mapping_id: mappingId || null,
-          source_channel: mapping?.source_channel_id || channelUrl,
+          source_channel: sourceChannelValue,
           target_channel: mapping?.target_channel_id || null
+        }, {
+          mappingId: mappingId || null,
+          sourceChannel: sourceChannelValue,
         });
         
         if (outcome === 'added') added++;
@@ -402,15 +420,9 @@ export async function POST(request: NextRequest) {
         if (result.shorts.length === 0) {
           mappingsWithNoShorts++;
         }
+        const sourceChannelValue = mapping.source_channel_id || mapping.source_channel_url;
         
         for (const short of result.shorts) {
-          const existing = await getShortByVideoId(short.videoId);
-          if (existing) {
-            totalDuplicates++;
-            mappingDuplicates++;
-            continue;
-          }
-          
           const outcome = await persistShort({
             video_id: short.videoId,
             video_url: short.videoUrl,
@@ -422,8 +434,11 @@ export async function POST(request: NextRequest) {
             published_date: short.publishedDate,
             status: 'Pending',
             mapping_id: mapping.id,
-            source_channel: mapping.source_channel_id || mapping.source_channel_url,
+            source_channel: sourceChannelValue,
             target_channel: mapping.target_channel_id
+          }, {
+            mappingId: mapping.id,
+            sourceChannel: sourceChannelValue,
           });
           
           if (outcome === 'added') {
@@ -476,7 +491,9 @@ export async function POST(request: NextRequest) {
       }
       
       // Check for duplicates
-      const existing = await getShortByVideoId(video_id);
+      const existing = await getShortByVideoIdForScope(video_id, {
+        mappingId: mappingId || null,
+      });
       if (existing) {
         return NextResponse.json(
           { success: false, error: 'Video already exists' },

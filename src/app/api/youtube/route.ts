@@ -8,7 +8,7 @@ import {
   cleanupUploadedShortsForSingleDestination,
   type ChannelMapping
 } from '@/lib/supabase/database';
-import { downloadVideo, validateVideo, deleteVideo } from '@/lib/youtube/video-handler';
+import { deleteVideo, downloadVideo, prepareVideoForUpload, validateVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo, getVideoStatus } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
 import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
@@ -133,6 +133,16 @@ function buildUploadTags(existingTags: string[] | null, hashtags: string[], bloc
   return Array.from(new Set(filterBlockedTagValues(tags, blockedTerms))).slice(0, 20);
 }
 
+async function cleanupProcessingVideoFiles(paths: Array<string | null | undefined>): Promise<void> {
+  const uniquePaths = Array.from(
+    new Set(paths.map((value) => (typeof value === 'string' ? value.trim() : '')).filter(Boolean))
+  );
+
+  for (const filePath of uniquePaths) {
+    await deleteVideo(filePath);
+  }
+}
+
 // POST - Download or Upload video
 export async function POST(request: NextRequest) {
   try {
@@ -204,6 +214,26 @@ export async function POST(request: NextRequest) {
       
       await createLog(shortId, 'upload', 'success', 'Starting upload');
       await updateShort(shortId, { status: 'Uploading' });
+      await createLog(shortId, 'quality', 'success', 'Starting high-quality enhancement before upload');
+
+      const preparedVideo = await prepareVideoForUpload(filePath, short.video_id);
+      if (!preparedVideo.success) {
+        await cleanupProcessingVideoFiles([filePath]);
+        await updateShort(shortId, {
+          status: 'Failed',
+          error_log: preparedVideo.error,
+        });
+        await createLog(shortId, 'quality', 'error', preparedVideo.error);
+        return NextResponse.json({ success: false, error: preparedVideo.error });
+      }
+
+      const uploadFilePath = preparedVideo.filePath;
+      const qualityMessage = preparedVideo.warning
+        ? preparedVideo.warning
+        : preparedVideo.enhanced
+          ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video for upload`
+          : 'Using original source-quality video for upload';
+      await createLog(shortId, 'quality', 'success', qualityMessage);
       
       const uploadBehavior = await resolveUploadBehavior(short.mapping_id);
       const visibility = uploadBehavior.visibility;
@@ -244,6 +274,7 @@ export async function POST(request: NextRequest) {
 
       const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
       if (destinationAuth.error) {
+        await cleanupProcessingVideoFiles([filePath, uploadFilePath]);
         await updateShort(shortId, {
           status: 'Failed',
           error_log: destinationAuth.error
@@ -254,7 +285,7 @@ export async function POST(request: NextRequest) {
       
       // Upload to YouTube
       const result = await uploadVideo(
-        filePath,
+        uploadFilePath,
         title,
         description,
         buildUploadTags(short.tags || [], hashtags, sourceTagBlockList),
@@ -265,6 +296,7 @@ export async function POST(request: NextRequest) {
       );
       
       if (!result.success) {
+        await cleanupProcessingVideoFiles([filePath, uploadFilePath]);
         await updateShort(shortId, { 
           status: 'Failed', 
           error_log: result.error 
@@ -284,7 +316,7 @@ export async function POST(request: NextRequest) {
 
       await runUploadedCleanup();
       
-      await deleteVideo(filePath);
+      await cleanupProcessingVideoFiles([filePath, uploadFilePath]);
       await createLog(shortId, 'upload', 'success', `Uploaded as ${result.videoId}`);
 
       if (uploadBehavior.scheduledPublishAt) {
@@ -320,9 +352,10 @@ export async function POST(request: NextRequest) {
       }
       
       // Validate
-      const validation = await validateVideo(downloadResult.filePath!);
+      const downloadFilePath = downloadResult.filePath!;
+      const validation = await validateVideo(downloadFilePath);
       if (!validation.valid) {
-        await deleteVideo(downloadResult.filePath!);
+        await cleanupProcessingVideoFiles([downloadFilePath]);
         await updateShort(shortId, { 
           status: 'Failed', 
           error_log: validation.error 
@@ -332,7 +365,27 @@ export async function POST(request: NextRequest) {
       }
 
       await updateShort(shortId, { status: 'Downloaded' });
-      await createLog(shortId, 'download', 'success', `Downloaded to ${downloadResult.filePath}`);
+      await createLog(shortId, 'download', 'success', `Downloaded to ${downloadFilePath}`);
+      await createLog(shortId, 'quality', 'success', 'Starting high-quality enhancement before upload');
+
+      const preparedVideo = await prepareVideoForUpload(downloadFilePath, short.video_id);
+      if (!preparedVideo.success) {
+        await cleanupProcessingVideoFiles([downloadFilePath]);
+        await updateShort(shortId, {
+          status: 'Failed',
+          error_log: preparedVideo.error,
+        });
+        await createLog(shortId, 'quality', 'error', preparedVideo.error);
+        return NextResponse.json({ success: false, error: preparedVideo.error });
+      }
+
+      const uploadFilePath = preparedVideo.filePath;
+      const qualityMessage = preparedVideo.warning
+        ? preparedVideo.warning
+        : preparedVideo.enhanced
+          ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video for upload`
+          : 'Using original source-quality video for upload';
+      await createLog(shortId, 'quality', 'success', qualityMessage);
       
       // Upload
       const uploadBehavior = await resolveUploadBehavior(short.mapping_id);
@@ -364,6 +417,7 @@ export async function POST(request: NextRequest) {
 
       const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
       if (destinationAuth.error) {
+        await cleanupProcessingVideoFiles([downloadFilePath, uploadFilePath]);
         await updateShort(shortId, {
           status: 'Failed',
           error_log: destinationAuth.error
@@ -373,7 +427,7 @@ export async function POST(request: NextRequest) {
       }
       
       const uploadResult = await uploadVideo(
-        downloadResult.filePath!,
+        uploadFilePath,
         title,
         description,
         buildUploadTags(short.tags || [], hashtags, sourceTagBlockList),
@@ -384,7 +438,7 @@ export async function POST(request: NextRequest) {
       );
       
       // Clean up
-      await deleteVideo(downloadResult.filePath!);
+      await cleanupProcessingVideoFiles([downloadFilePath, uploadFilePath]);
       
       if (!uploadResult.success) {
         await updateShort(shortId, { 

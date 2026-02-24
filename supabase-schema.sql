@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS destination_channels (
 -- Shorts data table
 CREATE TABLE IF NOT EXISTS shorts_data (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    video_id TEXT UNIQUE NOT NULL,
+    video_id TEXT NOT NULL,
     video_url TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT,
@@ -109,12 +109,19 @@ CREATE INDEX IF NOT EXISTS idx_shorts_status ON shorts_data(status);
 CREATE INDEX IF NOT EXISTS idx_shorts_scheduled_date ON shorts_data(scheduled_date);
 CREATE INDEX IF NOT EXISTS idx_shorts_created_at ON shorts_data(created_at);
 CREATE INDEX IF NOT EXISTS idx_shorts_mapping_id ON shorts_data(mapping_id);
+CREATE INDEX IF NOT EXISTS idx_shorts_video_id ON shorts_data(video_id);
 CREATE INDEX IF NOT EXISTS idx_shorts_source_channel ON shorts_data(source_channel);
 CREATE INDEX IF NOT EXISTS idx_shorts_target_channel ON shorts_data(target_channel);
 CREATE INDEX IF NOT EXISTS idx_shorts_uploaded_date ON shorts_data(uploaded_date);
 CREATE INDEX IF NOT EXISTS idx_shorts_source_status ON shorts_data(source_channel, status);
 CREATE INDEX IF NOT EXISTS idx_shorts_status_uploaded_date ON shorts_data(status, uploaded_date);
 CREATE INDEX IF NOT EXISTS idx_shorts_source_created_at ON shorts_data(source_channel, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_shorts_video_unmapped_source
+  ON shorts_data(video_id, source_channel)
+  WHERE mapping_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_shorts_video_mapping
+  ON shorts_data(video_id, mapping_id)
+  WHERE mapping_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_logs_short_id ON upload_logs(short_id);
 CREATE INDEX IF NOT EXISTS idx_logs_created_at ON upload_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_logs_action ON upload_logs(action);

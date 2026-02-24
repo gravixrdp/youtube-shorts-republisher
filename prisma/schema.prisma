@@ -79,7 +79,7 @@ model DestinationChannel {
 // YouTube Shorts data storage
 model ShortsData {
   id              String    @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
-  videoId         String    @unique @map("video_id")
+  videoId         String    @map("video_id")
   videoUrl        String    @map("video_url")
   title           String
   description     String?   @db.Text
@@ -106,6 +106,7 @@ model ShortsData {
 
   @@index([status])
   @@index([scheduledDate])
+  @@index([videoId])
   @@index([mappingId])
   @@index([sourceChannel])
   @@index([targetChannel])

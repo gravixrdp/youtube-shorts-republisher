@@ -15,7 +15,7 @@ import {
   type ChannelMapping,
 } from '@/lib/supabase/database';
 import type { ShortsData } from '@/lib/supabase/client';
-import { cleanupTempFiles, deleteVideo, downloadVideo, validateVideo } from '@/lib/youtube/video-handler';
+import { cleanupTempFiles, deleteVideo, downloadVideo, prepareVideoForUpload, validateVideo } from '@/lib/youtube/video-handler';
 import { uploadVideo, updateVideoVisibility } from '@/lib/youtube/uploader';
 import { enhanceContent } from '@/lib/ai-enhancement';
 import { getRefreshTokenForDestinationChannel } from '@/lib/youtube/destination-channels';
@@ -156,6 +156,16 @@ function parseMappingId(raw: unknown): string | undefined {
 
   const trimmed = raw.trim();
   return trimmed || undefined;
+}
+
+async function cleanupProcessingVideoFiles(paths: Array<string | null | undefined>): Promise<void> {
+  const uniquePaths = Array.from(
+    new Set(paths.map((value) => (typeof value === 'string' ? value.trim() : '')).filter(Boolean))
+  );
+
+  for (const filePath of uniquePaths) {
+    await deleteVideo(filePath);
+  }
 }
 
 function nextRetryTime(minutes: number): string {
@@ -395,9 +405,10 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
     }
 
     // Validate
-    const validation = await validateVideo(downloadResult.filePath!);
+    const downloadFilePath = downloadResult.filePath!;
+    const validation = await validateVideo(downloadFilePath);
     if (!validation.valid) {
-      await deleteVideo(downloadResult.filePath!);
+      await cleanupProcessingVideoFiles([downloadFilePath]);
       await updateShort(short.id, {
         status: 'Failed',
         error_log: validation.error
@@ -407,7 +418,27 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
     }
 
     await updateShort(short.id, { status: 'Downloaded' });
-    await createLog(short.id, 'download', 'success', `Downloaded to ${downloadResult.filePath}`);
+    await createLog(short.id, 'download', 'success', `Downloaded to ${downloadFilePath}`);
+    await createLog(short.id, 'quality', 'success', 'Starting high-quality enhancement before upload');
+
+    const preparedVideo = await prepareVideoForUpload(downloadFilePath, short.video_id);
+    if (!preparedVideo.success) {
+      await cleanupProcessingVideoFiles([downloadFilePath]);
+      await updateShort(short.id, {
+        status: 'Failed',
+        error_log: preparedVideo.error,
+      });
+      await createLog(short.id, 'quality', 'error', preparedVideo.error);
+      return { success: false, message: `Quality enhancement failed: ${preparedVideo.error}` };
+    }
+
+    const qualityMessage = preparedVideo.warning
+      ? preparedVideo.warning
+      : preparedVideo.enhanced
+        ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video for upload`
+        : `Using original source-quality video for upload`;
+    await createLog(short.id, 'quality', 'success', qualityMessage);
+    const uploadFilePath = preparedVideo.filePath;
 
     // Prepare content
     const uploadBehavior = await resolveUploadBehavior(short.mapping_id || mappingId || null);
@@ -438,7 +469,7 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
 
     const destinationAuth = await resolveDestinationRefreshToken(short.mapping_id);
     if (destinationAuth.error) {
-      await deleteVideo(downloadResult.filePath!);
+      await cleanupProcessingVideoFiles([downloadFilePath, uploadFilePath]);
       await updateShort(short.id, {
         status: 'Failed',
         error_log: destinationAuth.error
@@ -451,7 +482,7 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
 
     // Upload
     const uploadResult = await uploadVideo(
-      downloadResult.filePath!,
+      uploadFilePath,
       title,
       description,
       buildUploadTags(short.tags || [], hashtags, sourceTagBlockList),
@@ -462,7 +493,7 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
     );
 
     // Clean up
-    await deleteVideo(downloadResult.filePath!);
+    await cleanupProcessingVideoFiles([downloadFilePath, uploadFilePath]);
 
     if (!uploadResult.success) {
       await updateShort(short.id, {

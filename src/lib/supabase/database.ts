@@ -585,10 +585,44 @@ export async function getShortByVideoId(videoId: string): Promise<ShortsData | n
     .from('shorts_data')
     .select('*')
     .eq('video_id', videoId)
-    .single();
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (error) return null;
-  return data;
+  return data || null;
+}
+
+export async function getShortByVideoIdForScope(
+  videoId: string,
+  options?: {
+    mappingId?: string | null;
+    sourceChannel?: string | null;
+  }
+): Promise<ShortsData | null> {
+  let query = supabaseAdmin
+    .from('shorts_data')
+    .select('*')
+    .eq('video_id', videoId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (options && Object.prototype.hasOwnProperty.call(options, 'mappingId')) {
+    const mappingId = options.mappingId;
+    if (mappingId === null) {
+      query = query.is('mapping_id', null);
+    } else if (typeof mappingId === 'string' && mappingId.trim()) {
+      query = query.eq('mapping_id', mappingId.trim());
+    }
+  }
+
+  if (options?.sourceChannel?.trim()) {
+    query = query.eq('source_channel', options.sourceChannel.trim());
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) return null;
+  return data || null;
 }
 
 export async function getPendingShorts(limit: number = 10, mappingId?: string): Promise<ShortsData[]> {
@@ -641,25 +675,43 @@ export async function claimOldestUnmappedPendingShortForMapping(
   }
 
   for (const candidate of candidates) {
-    const { data: claimed, error: claimError } = await supabaseAdmin
-      .from('shorts_data')
-      .update({
-        mapping_id: mappingId,
-        target_channel: targetChannelId || null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', candidate.id)
-      .eq('status', 'Pending')
-      .is('mapping_id', null)
-      .select('*')
-      .maybeSingle();
-
-    if (claimError) {
+    const sourceVideoId = typeof candidate.video_id === 'string' ? candidate.video_id.trim() : '';
+    if (!sourceVideoId) {
       continue;
     }
 
-    if (claimed) {
-      return claimed as ShortsData;
+    const existingMapped = await getShortByVideoIdForScope(sourceVideoId, {
+      mappingId,
+    });
+    if (existingMapped) {
+      continue;
+    }
+
+    const cloned = await createShort({
+      video_id: sourceVideoId,
+      video_url: candidate.video_url,
+      title: candidate.title,
+      description: candidate.description,
+      tags: candidate.tags,
+      thumbnail_url: candidate.thumbnail_url,
+      duration: candidate.duration,
+      published_date: candidate.published_date,
+      status: 'Pending',
+      scheduled_date: null,
+      uploaded_date: null,
+      target_video_id: null,
+      retry_count: 0,
+      error_log: null,
+      ai_title: null,
+      ai_description: null,
+      ai_hashtags: null,
+      mapping_id: mappingId,
+      source_channel: candidate.source_channel || sourceValues[0] || null,
+      target_channel: targetChannelId || null,
+    });
+
+    if (cloned) {
+      return cloned;
     }
   }
 
@@ -840,42 +892,86 @@ export async function linkUnmappedSourceShortsToMapping(
   sourceChannelUrl: string | null | undefined,
   targetChannelId: string
 ): Promise<number> {
-  const now = new Date().toISOString();
-  let linked = 0;
+  const sourceValues = Array.from(
+    new Set(
+      [sourceChannelId?.trim(), sourceChannelUrl?.trim()].filter(
+        (value): value is string => Boolean(value)
+      )
+    )
+  );
 
-  const { data: byId, error: byIdError } = await supabaseAdmin
-    .from('shorts_data')
-    .update({
-      mapping_id: mappingId,
-      target_channel: targetChannelId,
-      updated_at: now,
-    })
-    .is('mapping_id', null)
-    .eq('source_channel', sourceChannelId)
-    .select('id');
-
-  if (byIdError) {
-    console.error('Error linking source shorts by channel_id:', byIdError);
-  } else {
-    linked += (byId || []).length;
+  if (sourceValues.length === 0) {
+    return 0;
   }
 
-  if (sourceChannelUrl) {
-    const { data: byUrl, error: byUrlError } = await supabaseAdmin
-      .from('shorts_data')
-      .update({
-        mapping_id: mappingId,
-        target_channel: targetChannelId,
-        updated_at: now,
-      })
-      .is('mapping_id', null)
-      .eq('source_channel', sourceChannelUrl)
-      .select('id');
+  const { data: existingForMapping, error: existingError } = await supabaseAdmin
+    .from('shorts_data')
+    .select('video_id')
+    .eq('mapping_id', mappingId)
+    .in('source_channel', sourceValues);
 
-    if (byUrlError) {
-      console.error('Error linking source shorts by channel_url:', byUrlError);
-    } else {
-      linked += (byUrl || []).length;
+  if (existingError) {
+    console.error('Error reading existing mapped shorts during link:', existingError);
+    return 0;
+  }
+
+  const existingVideoIds = new Set(
+    (existingForMapping || [])
+      .map((row) => (typeof row.video_id === 'string' ? row.video_id.trim() : ''))
+      .filter(Boolean)
+  );
+
+  const { data: sourceRows, error: sourceReadError } = await supabaseAdmin
+    .from('shorts_data')
+    .select('*')
+    .in('source_channel', sourceValues)
+    .order('created_at', { ascending: false })
+    .limit(5000);
+
+  if (sourceReadError) {
+    console.error('Error reading source shorts for mapping link:', sourceReadError);
+    return 0;
+  }
+
+  const latestByVideoId = new Map<string, ShortsData>();
+  for (const row of sourceRows || []) {
+    const sourceVideoId = typeof row.video_id === 'string' ? row.video_id.trim() : '';
+    if (!sourceVideoId) {
+      continue;
+    }
+    if (existingVideoIds.has(sourceVideoId) || latestByVideoId.has(sourceVideoId)) {
+      continue;
+    }
+    latestByVideoId.set(sourceVideoId, row as ShortsData);
+  }
+
+  let linked = 0;
+  for (const [sourceVideoId, row] of latestByVideoId.entries()) {
+    const created = await createShort({
+      video_id: sourceVideoId,
+      video_url: row.video_url,
+      title: row.title,
+      description: row.description,
+      tags: row.tags,
+      thumbnail_url: row.thumbnail_url,
+      duration: row.duration,
+      published_date: row.published_date,
+      status: 'Pending',
+      scheduled_date: null,
+      uploaded_date: null,
+      target_video_id: null,
+      retry_count: 0,
+      error_log: null,
+      ai_title: null,
+      ai_description: null,
+      ai_hashtags: null,
+      mapping_id: mappingId,
+      source_channel: row.source_channel || sourceValues[0] || null,
+      target_channel: targetChannelId,
+    });
+
+    if (created) {
+      linked++;
     }
   }
 
