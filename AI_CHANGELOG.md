@@ -36,7 +36,8 @@ Use this file as the single coordination source between Codex and Antigravity.
   - File:
     - `src/lib/youtube/uploader.ts`
 - Improved enhancement speed control:
-  - Added configurable FFmpeg preset env support (`SHORTS_ENHANCE_PRESET` / `VIDEO_ENHANCE_PRESET`) and set runtime default to `faster`.
+  - Added configurable FFmpeg preset env support (`SHORTS_ENHANCE_PRESET` / `VIDEO_ENHANCE_PRESET`) and runtime default `faster`.
+  - Added configurable FFmpeg thread cap (`SHORTS_ENHANCE_THREADS` / `VIDEO_ENHANCE_THREADS`) and runtime default `1` to reduce memory spikes.
   - File:
     - `src/lib/youtube/video-handler.ts`
     - `.env`
