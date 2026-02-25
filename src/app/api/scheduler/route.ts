@@ -418,7 +418,15 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
     }
 
     await updateShort(short.id, { status: 'Downloaded' });
-    await createLog(short.id, 'download', 'success', `Downloaded to ${downloadFilePath}`);
+    const durationLabel =
+      typeof validation.duration === 'number' && Number.isFinite(validation.duration)
+        ? ` (${validation.duration.toFixed(1)}s)`
+        : '';
+    const downloadSummary =
+      Number.isFinite(validation.width) && Number.isFinite(validation.height)
+        ? `Downloaded source ${validation.width}x${validation.height}${durationLabel}`
+        : `Downloaded to ${downloadFilePath}`;
+    await createLog(short.id, 'download', 'success', downloadSummary);
     await createLog(short.id, 'quality', 'success', 'Starting high-quality enhancement before upload');
 
     const preparedVideo = await prepareVideoForUpload(downloadFilePath, short.video_id);
@@ -432,10 +440,14 @@ async function processNextPending(mappingId?: string): Promise<{ success: boolea
       return { success: false, message: `Quality enhancement failed: ${preparedVideo.error}` };
     }
 
+    const enhancedResolution =
+      preparedVideo.targetWidth && preparedVideo.targetHeight
+        ? ` (${preparedVideo.targetWidth}x${preparedVideo.targetHeight})`
+        : '';
     const qualityMessage = preparedVideo.warning
       ? preparedVideo.warning
       : preparedVideo.enhanced
-        ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video for upload`
+        ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video${enhancedResolution} for upload`
         : `Using original source-quality video for upload`;
     await createLog(short.id, 'quality', 'success', qualityMessage);
     const uploadFilePath = preparedVideo.filePath;

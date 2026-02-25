@@ -192,7 +192,15 @@ export async function POST(request: NextRequest) {
       }
       
       await updateShort(shortId, { status: 'Downloaded' });
-      await createLog(shortId, 'download', 'success', `Downloaded to ${result.filePath}`);
+      const durationLabel =
+        typeof validation.duration === 'number' && Number.isFinite(validation.duration)
+          ? ` (${validation.duration.toFixed(1)}s)`
+          : '';
+      const downloadSummary =
+        Number.isFinite(validation.width) && Number.isFinite(validation.height)
+          ? `Downloaded source ${validation.width}x${validation.height}${durationLabel}`
+          : `Downloaded to ${result.filePath}`;
+      await createLog(shortId, 'download', 'success', downloadSummary);
       
       return NextResponse.json({ 
         success: true, 
@@ -228,10 +236,14 @@ export async function POST(request: NextRequest) {
       }
 
       const uploadFilePath = preparedVideo.filePath;
+      const enhancedResolution =
+        preparedVideo.targetWidth && preparedVideo.targetHeight
+          ? ` (${preparedVideo.targetWidth}x${preparedVideo.targetHeight})`
+          : '';
       const qualityMessage = preparedVideo.warning
         ? preparedVideo.warning
         : preparedVideo.enhanced
-          ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video for upload`
+          ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video${enhancedResolution} for upload`
           : 'Using original source-quality video for upload';
       await createLog(shortId, 'quality', 'success', qualityMessage);
       
@@ -365,7 +377,15 @@ export async function POST(request: NextRequest) {
       }
 
       await updateShort(shortId, { status: 'Downloaded' });
-      await createLog(shortId, 'download', 'success', `Downloaded to ${downloadFilePath}`);
+      const processDurationLabel =
+        typeof validation.duration === 'number' && Number.isFinite(validation.duration)
+          ? ` (${validation.duration.toFixed(1)}s)`
+          : '';
+      const processDownloadSummary =
+        Number.isFinite(validation.width) && Number.isFinite(validation.height)
+          ? `Downloaded source ${validation.width}x${validation.height}${processDurationLabel}`
+          : `Downloaded to ${downloadFilePath}`;
+      await createLog(shortId, 'download', 'success', processDownloadSummary);
       await createLog(shortId, 'quality', 'success', 'Starting high-quality enhancement before upload');
 
       const preparedVideo = await prepareVideoForUpload(downloadFilePath, short.video_id);
@@ -380,10 +400,14 @@ export async function POST(request: NextRequest) {
       }
 
       const uploadFilePath = preparedVideo.filePath;
+      const processEnhancedResolution =
+        preparedVideo.targetWidth && preparedVideo.targetHeight
+          ? ` (${preparedVideo.targetWidth}x${preparedVideo.targetHeight})`
+          : '';
       const qualityMessage = preparedVideo.warning
         ? preparedVideo.warning
         : preparedVideo.enhanced
-          ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video for upload`
+          ? `Prepared ${preparedVideo.usedProfile.toUpperCase()} enhanced video${processEnhancedResolution} for upload`
           : 'Using original source-quality video for upload';
       await createLog(shortId, 'quality', 'success', qualityMessage);
       
