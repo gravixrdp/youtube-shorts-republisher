@@ -21,9 +21,7 @@ git reset -q .zscripts/hourly-auto-push.log >/dev/null 2>&1 || true
 
 if git diff --cached --quiet; then
   # No new changes to publish, but keep local main synced.
-  git fetch origin main
-  if ! git rebase origin/main >/dev/null 2>&1; then
-    git rebase --abort >/dev/null 2>&1 || true
+  if ! git pull --rebase --autostash origin main >/dev/null 2>&1; then
     exit 1
   fi
   exit 0
@@ -31,9 +29,7 @@ fi
 
 git commit -m "chore: hourly auto-push $(date -u +'%Y-%m-%d %H:%M UTC')"
 
-git fetch origin main
-if ! git rebase origin/main >/dev/null 2>&1; then
-  git rebase --abort >/dev/null 2>&1 || true
+if ! git pull --rebase --autostash origin main >/dev/null 2>&1; then
   exit 1
 fi
 
