@@ -61,7 +61,13 @@ interface Short {
   target_video_id: string | null;
   retry_count: number;
   error_log: string | null;
+  live_stage?: string;
+  live_message?: string | null;
+  live_at?: string | null;
+  live_action?: string | null;
+  live_action_status?: 'success' | 'error' | null;
   created_at: string;
+  updated_at: string;
 }
 
 interface Stats {
@@ -108,7 +114,7 @@ interface ChannelMapping {
   upload_time_morning: string | null;
   upload_time_evening: string | null;
   publish_delay_hours: number | null;
-  default_visibility: string;
+  default_visibility: string | null;
   ai_enhancement_enabled: boolean;
   last_fetched_at: string | null;
   total_fetched: number;
@@ -227,7 +233,7 @@ const DEFAULT_MAPPING_FORM = {
   upload_time_morning: '09:00',
   upload_time_evening: '18:00',
   publish_delay_hours: '__global__',
-  default_visibility: 'public',
+  default_visibility: '__global__',
   ai_enhancement_enabled: false,
 };
 
@@ -457,7 +463,7 @@ export default function GRAVIX() {
 
   const fetchShorts = useCallback(async () => {
     try {
-      const response = await fetch('/api/videos?limit=100&withTotal=false');
+      const response = await fetch('/api/videos?limit=100&withTotal=false&includeProgress=true');
       const data = await response.json();
       if (data.success) {
         setShorts(data.shorts || []);
@@ -532,6 +538,10 @@ export default function GRAVIX() {
       console.error('Failed to fetch destination channels:', error);
     }
   }, []);
+
+  const hasActiveProcessing = useMemo(() => {
+    return shorts.some((short) => short.status === 'Downloaded' || short.status === 'Uploading');
+  }, [shorts]);
 
   useEffect(() => {
     let mounted = true;
@@ -656,7 +666,7 @@ export default function GRAVIX() {
       return;
     }
 
-    const intervalMs = activeTab === 'videos' ? 4000 : activeTab === 'logs' ? 15000 : 12000;
+    const intervalMs = activeTab === 'videos' ? (hasActiveProcessing ? 2000 : 4000) : activeTab === 'logs' ? 15000 : 12000;
     const statsIntervalMs = 12000;
     let cancelled = false;
     let inFlight = false;
@@ -700,7 +710,7 @@ export default function GRAVIX() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [activeTab, fetchShorts, fetchStats, isWindowVisible]);
+  }, [activeTab, fetchShorts, fetchStats, hasActiveProcessing, isWindowVisible]);
 
   const refreshAll = useCallback(async () => {
     setActionState('refresh', true);
@@ -1252,7 +1262,7 @@ export default function GRAVIX() {
           mapping.publish_delay_hours === null || mapping.publish_delay_hours === undefined
             ? '__global__'
             : String(mapping.publish_delay_hours),
-        default_visibility: mapping.default_visibility,
+        default_visibility: mapping.default_visibility || '__global__',
         ai_enhancement_enabled: mapping.ai_enhancement_enabled,
       });
     } else {
@@ -1632,6 +1642,37 @@ export default function GRAVIX() {
 
     return queue.sort((first, second) => first.scheduledAt - second.scheduledAt).slice(0, 8);
   }, [shorts, mappingNameById, currentMinuteKey]);
+
+  const formatLiveStage = useCallback((short: Short) => {
+    const stage = short.live_stage?.trim();
+    if (stage) {
+      return stage;
+    }
+
+    if (short.status === 'Pending') return 'Queue Pending';
+    if (short.status === 'Downloaded') return 'Downloaded';
+    if (short.status === 'Uploading') return 'Uploading';
+    if (short.status === 'Uploaded') return short.scheduled_date ? 'Scheduled' : 'Uploaded';
+    if (short.status === 'Failed') return 'Failed';
+    return short.status;
+  }, []);
+
+  const formatLiveMessage = useCallback((short: Short) => {
+    const message = (short.live_message || '').trim();
+    if (message) {
+      return message;
+    }
+
+    if (short.status === 'Pending') {
+      return 'Waiting for processing';
+    }
+
+    if (short.status === 'Uploaded' && short.scheduled_date) {
+      return `Scheduled at ${new Date(short.scheduled_date).toLocaleString()}`;
+    }
+
+    return '—';
+  }, []);
 
   const statusBadge = useCallback((status: string) => {
     const map: Record<string, { cls: string; icon: JSX.Element }> = {
@@ -2534,6 +2575,10 @@ export default function GRAVIX() {
                       mapping.publish_delay_hours === null || mapping.publish_delay_hours === undefined
                         ? `Delay: Global (${globalPublishDelayHours}h)`
                         : `Delay: ${mapping.publish_delay_hours}h`;
+                    const globalVisibility = (config.default_visibility || 'public').toLowerCase();
+                    const mappingVisibilityLabel = mapping.default_visibility
+                      ? `Visibility: ${mapping.default_visibility}`
+                      : `Visibility: Global (${globalVisibility})`;
 
                     return (
                       <Card key={mapping.id} className={`card-interactive glass-panel ${!mapping.is_active ? 'opacity-65' : ''}`}>
@@ -2646,6 +2691,9 @@ export default function GRAVIX() {
                           <Badge variant="outline" className="text-[10px]">
                             {mappingDelayLabel}
                           </Badge>
+                          <Badge variant="outline" className="text-[10px]">
+                            {mappingVisibilityLabel}
+                          </Badge>
                         </CardFooter>
                       </Card>
                     );
@@ -2662,7 +2710,8 @@ export default function GRAVIX() {
                   <div>
                     <CardTitle className="font-heading text-lg">Video Library</CardTitle>
                     <CardDescription className="text-xs">
-                      {filteredShorts.length} videos in current filter · Live refresh {isWindowVisible ? 'on (4s)' : 'paused'}
+                      {filteredShorts.length} videos in current filter · Live refresh{' '}
+                      {isWindowVisible ? `on (${hasActiveProcessing ? '2s active' : '4s'})` : 'paused'}
                     </CardDescription>
                   </div>
 
@@ -2703,6 +2752,7 @@ export default function GRAVIX() {
                         <TableHead className="text-[11px] uppercase tracking-[0.12em]">Title</TableHead>
                         <TableHead className="w-16 text-[11px] uppercase tracking-[0.12em]">Time</TableHead>
                         <TableHead className="w-24 text-[11px] uppercase tracking-[0.12em]">Status</TableHead>
+                        <TableHead className="w-56 text-[11px] uppercase tracking-[0.12em]">Live Stage</TableHead>
                         <TableHead className="w-24 text-right text-[11px] uppercase tracking-[0.12em]">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -2725,6 +2775,10 @@ export default function GRAVIX() {
                               <div className="skeleton h-5 w-16" />
                             </TableCell>
                             <TableCell>
+                              <div className="skeleton mb-1 h-3 w-24" />
+                              <div className="skeleton h-2.5 w-40" />
+                            </TableCell>
+                            <TableCell>
                               <div className="ml-auto flex w-fit gap-1">
                                 <div className="skeleton h-7 w-7" />
                                 <div className="skeleton h-7 w-7" />
@@ -2734,7 +2788,7 @@ export default function GRAVIX() {
                         ))
                       ) : filteredShorts.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
+                          <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
                             <Video className="mx-auto mb-2 h-7 w-7 opacity-40" />
                             <p className="text-sm">No videos found</p>
                           </TableCell>
@@ -2775,6 +2829,11 @@ export default function GRAVIX() {
                                 <span className="text-xs text-muted-foreground">{short.duration}s</span>
                               </TableCell>
                               <TableCell>{statusBadge(short.status)}</TableCell>
+                              <TableCell>
+                                <p className="max-w-[220px] truncate text-xs font-medium">{formatLiveStage(short)}</p>
+                                <p className="max-w-[220px] truncate text-[10px] text-muted-foreground">{formatLiveMessage(short)}</p>
+                                <p className="text-[10px] text-muted-foreground">{fmtDate(short.live_at || short.updated_at)}</p>
+                              </TableCell>
                               <TableCell className="text-right">
                                 <div className="flex justify-end gap-1">
                                   <Button
@@ -3481,6 +3540,9 @@ export default function GRAVIX() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="__global__">
+                      Use Global ({(config.default_visibility || 'public').toLowerCase()})
+                    </SelectItem>
                     <SelectItem value="public">Public</SelectItem>
                     <SelectItem value="unlisted">Unlisted</SelectItem>
                     <SelectItem value="private">Private</SelectItem>

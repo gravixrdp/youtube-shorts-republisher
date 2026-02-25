@@ -12,6 +12,245 @@ import {
 } from '@/lib/supabase/database';
 import { fetchShortsFromChannel } from '@/lib/youtube/scraper';
 import { getSourceChannels } from '@/lib/youtube/source-channels';
+import { supabaseAdmin, type ShortsData } from '@/lib/supabase/client';
+
+type PipelineAction = 'process' | 'download' | 'validation' | 'quality' | 'upload' | 'publish';
+
+interface PipelineLogRow {
+  short_id: string | null;
+  action: string;
+  status: 'success' | 'error';
+  message: string | null;
+  created_at: string;
+}
+
+interface LivePipelineState {
+  live_stage: string;
+  live_message: string;
+  live_at: string;
+  live_action: PipelineAction | null;
+  live_action_status: 'success' | 'error' | null;
+}
+
+const PIPELINE_ACTIONS: PipelineAction[] = ['process', 'download', 'validation', 'quality', 'upload', 'publish'];
+const PIPELINE_ACTION_SET = new Set<string>(PIPELINE_ACTIONS);
+
+function normalizeMessage(value: string | null | undefined): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function fallbackPipelineState(short: ShortsData): LivePipelineState {
+  if (short.status === 'Pending') {
+    return {
+      live_stage: 'Queue Pending',
+      live_message: 'Waiting for processing',
+      live_at: short.updated_at,
+      live_action: null,
+      live_action_status: null,
+    };
+  }
+
+  if (short.status === 'Downloaded') {
+    return {
+      live_stage: 'Downloaded',
+      live_message: 'Video downloaded. Waiting for quality/upload stage.',
+      live_at: short.updated_at,
+      live_action: null,
+      live_action_status: null,
+    };
+  }
+
+  if (short.status === 'Uploading') {
+    return {
+      live_stage: 'Uploading',
+      live_message: 'Upload in progress',
+      live_at: short.updated_at,
+      live_action: null,
+      live_action_status: null,
+    };
+  }
+
+  if (short.status === 'Failed') {
+    return {
+      live_stage: 'Failed',
+      live_message: normalizeMessage(short.error_log) || 'Processing failed',
+      live_at: short.updated_at,
+      live_action: null,
+      live_action_status: null,
+    };
+  }
+
+  if (short.status === 'Uploaded') {
+    if (short.scheduled_date) {
+      return {
+        live_stage: 'Scheduled',
+        live_message: `Public publish scheduled at ${short.scheduled_date}`,
+        live_at: short.updated_at,
+        live_action: null,
+        live_action_status: null,
+      };
+    }
+
+    return {
+      live_stage: 'Uploaded',
+      live_message: short.target_video_id ? `Uploaded as ${short.target_video_id}` : 'Uploaded successfully',
+      live_at: short.updated_at,
+      live_action: null,
+      live_action_status: null,
+    };
+  }
+
+  return {
+    live_stage: short.status,
+    live_message: short.status,
+    live_at: short.updated_at,
+    live_action: null,
+    live_action_status: null,
+  };
+}
+
+function pipelineStateFromLog(short: ShortsData, log: PipelineLogRow): LivePipelineState {
+  const action = log.action as PipelineAction;
+  const message = normalizeMessage(log.message);
+
+  if (log.status === 'error') {
+    return {
+      live_stage: `${action.toUpperCase()} Error`,
+      live_message: message || `${action} failed`,
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  if (action === 'process') {
+    return {
+      live_stage: 'Processing',
+      live_message: message || 'Process started',
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  if (action === 'download') {
+    const stage = message.toLowerCase().includes('starting') ? 'Downloading' : 'Downloaded';
+    return {
+      live_stage: stage,
+      live_message: message || 'Download completed',
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  if (action === 'validation') {
+    return {
+      live_stage: 'Validating',
+      live_message: message || 'Validation completed',
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  if (action === 'quality') {
+    const lower = message.toLowerCase();
+    const stage = lower.includes('starting') ? 'Enhancing HD' : 'Quality Ready';
+    return {
+      live_stage: stage,
+      live_message: message || 'Quality preparation completed',
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  if (action === 'upload') {
+    const lower = message.toLowerCase();
+    const stage = lower.includes('starting') ? 'Uploading' : 'Upload Complete';
+    return {
+      live_stage: stage,
+      live_message: message || 'Upload finished',
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  if (action === 'publish') {
+    const lower = message.toLowerCase();
+    let stage = 'Publish';
+    if (lower.includes('scheduled')) {
+      stage = 'Scheduled';
+    } else if (lower.includes('public')) {
+      stage = 'Published';
+    }
+
+    return {
+      live_stage: stage,
+      live_message: message || 'Publish stage updated',
+      live_at: log.created_at,
+      live_action: action,
+      live_action_status: log.status,
+    };
+  }
+
+  return fallbackPipelineState(short);
+}
+
+async function attachLivePipelineState(shorts: ShortsData[]): Promise<Array<ShortsData & LivePipelineState>> {
+  if (shorts.length === 0) {
+    return [];
+  }
+
+  const shortIds = Array.from(new Set(shorts.map((short) => short.id).filter(Boolean)));
+  if (shortIds.length === 0) {
+    return shorts.map((short) => ({ ...short, ...fallbackPipelineState(short) }));
+  }
+
+  const logQueryLimit = Math.min(2500, Math.max(200, shortIds.length * 16));
+  const { data: logRows, error } = await supabaseAdmin
+    .from('upload_logs')
+    .select('short_id, action, status, message, created_at')
+    .in('short_id', shortIds)
+    .order('created_at', { ascending: false })
+    .limit(logQueryLimit);
+
+  if (error || !logRows) {
+    if (error) {
+      console.error('Failed to load live pipeline logs:', error);
+    }
+    return shorts.map((short) => ({ ...short, ...fallbackPipelineState(short) }));
+  }
+
+  const latestByShortId = new Map<string, PipelineLogRow>();
+  for (const row of logRows as PipelineLogRow[]) {
+    const shortId = row.short_id?.trim();
+    if (!shortId || latestByShortId.has(shortId)) {
+      continue;
+    }
+    if (!PIPELINE_ACTION_SET.has(row.action)) {
+      continue;
+    }
+    latestByShortId.set(shortId, row);
+  }
+
+  return shorts.map((short) => {
+    const latestLog = latestByShortId.get(short.id);
+    if (!latestLog) {
+      return {
+        ...short,
+        ...fallbackPipelineState(short),
+      };
+    }
+
+    return {
+      ...short,
+      ...pipelineStateFromLog(short, latestLog),
+    };
+  });
+}
 
 async function createScrapeRunLog(
   status: 'success' | 'error',
@@ -41,15 +280,18 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get('status');
     const mappingId = searchParams.get('mappingId');
     const withTotal = searchParams.get('withTotal') !== 'false';
+    const includeProgress = searchParams.get('includeProgress') !== 'false';
     
     if (status) {
       const { getShortsByStatus } = await import('@/lib/supabase/database');
       const shorts = await getShortsByStatus(status);
-      return NextResponse.json({ success: true, shorts });
+      const payload = includeProgress ? await attachLivePipelineState(shorts as ShortsData[]) : shorts;
+      return NextResponse.json({ success: true, shorts: payload });
     }
     
     const { data, total } = await getAllShorts(limit, offset, withTotal);
-    return NextResponse.json({ success: true, shorts: data, total });
+    const payload = includeProgress ? await attachLivePipelineState(data as ShortsData[]) : data;
+    return NextResponse.json({ success: true, shorts: payload, total });
   } catch (error) {
     console.error('Videos GET error:', error);
     return NextResponse.json(

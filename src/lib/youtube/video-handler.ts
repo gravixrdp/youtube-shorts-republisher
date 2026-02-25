@@ -26,7 +26,7 @@ const VALID_ENHANCEMENT_PRESETS = new Set([
   'placebo',
 ]);
 
-export type VideoQualityProfile = 'source' | '4k' | '8k';
+export type VideoQualityProfile = 'source' | 'fullhd' | '4k' | '8k';
 
 interface VideoEnhancementTarget {
   width: number;
@@ -35,6 +35,11 @@ interface VideoEnhancementTarget {
 }
 
 const VIDEO_QUALITY_TARGETS: Record<Exclude<VideoQualityProfile, 'source'>, VideoEnhancementTarget> = {
+  fullhd: {
+    width: 1080,
+    height: 1920,
+    crf: 17,
+  },
   '4k': {
     width: 2160,
     height: 3840,
@@ -124,6 +129,16 @@ function normalizeQualityProfile(raw: string | null | undefined): VideoQualityPr
 
   if (normalized === '4k' || normalized === '2160p' || normalized === 'uhd') {
     return '4k';
+  }
+
+  if (
+    normalized === 'fullhd' ||
+    normalized === 'fhd' ||
+    normalized === '1080p' ||
+    normalized === '1080x1920' ||
+    normalized === 'hd'
+  ) {
+    return 'fullhd';
   }
 
   if (normalized === '8k' || normalized === '4320p') {
@@ -275,14 +290,14 @@ export async function downloadVideo(
 
     await fs.rm(outputPath, { force: true });
     
-    // Primary strategy: high-quality MP4 with Android/Web clients.
+    // Primary strategy: fetch the highest-quality stream first, then remux to MP4.
     const ytDlpBin = resolveYtDlpBinary();
-    const primaryCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android,web" -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
+    const primaryCommand = `"${ytDlpBin}" --no-playlist --retries 6 --fragment-retries 6 --extractor-args "youtube:player_client=android,web" -f "bv*+ba/best" -S "res,fps" --merge-output-format mp4 --remux-video mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
     const primaryResult = await runShellCommand(primaryCommand);
 
     if (!primaryResult.success) {
-      // Fallback strategy: less strict format to reduce 403/nsig failures.
-      const fallbackCommand = `"${ytDlpBin}" --no-playlist --retries 3 --fragment-retries 3 --extractor-args "youtube:player_client=android" -f "bv*+ba/b" --merge-output-format mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
+      // Fallback strategy: still quality-first, but with fewer sort constraints.
+      const fallbackCommand = `"${ytDlpBin}" --no-playlist --retries 6 --fragment-retries 6 --extractor-args "youtube:player_client=android" -f "bestvideo*+bestaudio/best" --merge-output-format mp4 --remux-video mp4 --force-overwrites -o "${outputPath}" "${videoUrl}"`;
       const fallbackResult = await runShellCommand(fallbackCommand);
 
       if (!fallbackResult.success) {

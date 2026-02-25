@@ -13,11 +13,24 @@ export interface UploadBehavior {
   delayHours: number;
 }
 
-function normalizeVisibility(raw: string | null | undefined): 'public' | 'unlisted' | 'private' {
+function normalizeVisibility(
+  raw: string | null | undefined,
+  fallback: 'public' | 'unlisted' | 'private' = 'public'
+): 'public' | 'unlisted' | 'private' {
   if (raw === 'public' || raw === 'unlisted' || raw === 'private') {
     return raw;
   }
-  return 'public';
+
+  if (!raw) {
+    return fallback;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized || normalized === '__global__' || normalized === 'global') {
+    return fallback;
+  }
+
+  return fallback;
 }
 
 function parseDelayHours(raw: string | null): number {
@@ -40,8 +53,8 @@ export async function resolveUploadBehavior(mappingId: string | null): Promise<U
     mappingId ? getMappingPublishDelayHours(mappingId) : Promise.resolve(null),
   ]);
 
-  const globalVisibility = normalizeVisibility(globalVisibilityRaw);
-  const mappingVisibility = normalizeVisibility(mapping?.default_visibility || globalVisibility);
+  const globalVisibility = normalizeVisibility(globalVisibilityRaw, 'public');
+  const mappingVisibility = normalizeVisibility(mapping?.default_visibility, globalVisibility);
   const aiEnabled = mapping ? Boolean(mapping.ai_enhancement_enabled) : globalAiRaw === 'true';
   const globalDelayHours = parseDelayHours(delayRaw);
   const delayHours = mappingDelayOverride === null ? globalDelayHours : mappingDelayOverride;

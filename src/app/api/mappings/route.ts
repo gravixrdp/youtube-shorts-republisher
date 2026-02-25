@@ -52,6 +52,30 @@ function normalizePublishDelayHours(value: unknown): number | null {
   return Math.min(72, Math.max(0, Math.floor(numeric)));
 }
 
+function normalizeMappingVisibility(
+  value: unknown,
+  fallback: 'public' | 'unlisted' | 'private' | null = 'public'
+): 'public' | 'unlisted' | 'private' | null {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === '__global__' || normalized === 'global') {
+    return null;
+  }
+
+  if (normalized === 'public' || normalized === 'unlisted' || normalized === 'private') {
+    return normalized;
+  }
+
+  return fallback;
+}
+
 // GET - Fetch all channel mappings
 export async function GET(request: NextRequest) {
   try {
@@ -114,7 +138,7 @@ export async function POST(request: NextRequest) {
       uploads_per_day: normalizeUploadsPerDay(uploads_per_day, 2),
       upload_time_morning: normalizeTime(upload_time_morning, '09:00'),
       upload_time_evening: normalizeTime(upload_time_evening, '18:00'),
-      default_visibility: default_visibility || 'public',
+      default_visibility: normalizeMappingVisibility(default_visibility, null),
       ai_enhancement_enabled: ai_enhancement_enabled || false,
       is_active: true
     });
@@ -183,6 +207,10 @@ export async function PUT(request: NextRequest) {
 
     if ('uploads_per_day' in normalizedData) {
       normalizedData.uploads_per_day = normalizeUploadsPerDay(normalizedData.uploads_per_day, 2);
+    }
+
+    if ('default_visibility' in normalizedData) {
+      normalizedData.default_visibility = normalizeMappingVisibility(normalizedData.default_visibility, null);
     }
 
     const hasDelayOverride = Object.prototype.hasOwnProperty.call(body, 'publish_delay_hours');
