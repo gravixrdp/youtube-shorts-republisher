@@ -7,7 +7,7 @@ import { Lock, Mail, ShieldCheck } from 'lucide-react';
 export default function AdminLoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('gravixrdp@gmail.com');
-  const [password, setPassword] = useState('');
+  const [password, setPassword] = useState('@VGahir444');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 

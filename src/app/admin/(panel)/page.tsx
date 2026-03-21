@@ -2941,7 +2941,7 @@ export default function GRAVIX() {
                     <div>
                       <Label className="text-xs">OAuth Redirect URI</Label>
                       <Input
-                        placeholder="http://210.79.129.69.nip.io:3000/api/youtube/oauth/callback"
+                        placeholder="http://YOUR_VPS_IP.nip.io:81/api/youtube/oauth/callback"
                         value={config.youtube_redirect_uri || ''}
                         onChange={(event) => setConfig({ ...config, youtube_redirect_uri: event.target.value })}
                         className="mt-1 h-9 text-xs"
